@@ -1,0 +1,24 @@
+{
+  "name": "investing-together",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Investing Together — an agentic research-and-content platform built on an owned, proprietary knowledge base.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "node --loader ts-node/esm scripts/migrate.ts",
+    "db:reset": "node --loader ts-node/esm scripts/migrate.ts --reset"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
