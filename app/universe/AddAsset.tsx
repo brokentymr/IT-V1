@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-interface Entity { name: string; ticker: string | null; listing: string; exchange: string | null; sector: string | null; rationale: string }
+interface Entity { name: string; ticker: string | null; listing: string; exchange: string | null; sector: string | null; rationale: string; verified?: boolean; verification?: string; cik?: string | null }
 interface AddResult { name: string; company_id?: string | null; listing?: string; result: string; research?: string; detail?: string }
 
 const listTag = (l: string) => (l === "listed" ? "good" : l === "pre_ipo" ? "warn" : "accent");
@@ -73,9 +73,11 @@ export default function AddAsset() {
                   <strong>{e.name}</strong>
                   {e.ticker ? <span className="tag mono">{e.ticker}</span> : null}
                   <span className={`tag ${listTag(e.listing)}`}>{e.listing.replace("_", "-")}</span>
+                  {e.verified ? <span className="tag good" title={e.verification}>✓ EDGAR-verified</span> : <span className="tag warn" title={e.verification}>unverified</span>}
                   {e.sector ? <span className="tag">{e.sector}</span> : null}
                 </div>
                 <div className="faint" style={{ fontSize: ".8rem" }}>{e.rationale}</div>
+                {e.verification ? <div className="faint" style={{ fontSize: ".72rem" }}>{e.verification}</div> : null}
               </div>
             </label>
           ))}

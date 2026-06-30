@@ -20,6 +20,10 @@ interface SnapContent {
   market_context?: { consensus?: Record<string, unknown> | null; analyst_view?: Record<string, unknown> | null };
   thesis?: { one_liner?: string; long_form?: string; tensions?: string[]; invalidation_triggers?: string[]; conviction?: number };
   hypotheses?: { drivers?: Array<{ name: string; metric: string; direction: string; framing: string; impact_pct: { bear: number; base: number; bull: number } }> };
+  research?: {
+    panel?: Array<{ lens: string; summary: string; key_points?: string[]; risks?: string[]; confidence: number }>;
+    verification?: { confidence: number; missing_sources?: string[]; recommendation: string; verdicts?: Array<{ claim: string; status: string; note: string }> };
+  };
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
@@ -102,6 +106,33 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
               </div>
             ) : null}
           </div>
+
+          {/* Analyst desk — expert panel + adversarial verification + confidence */}
+          {content.research ? (
+            <div className="panel">
+              <div className="spread">
+                <h2>Analyst desk</h2>
+                {content.research.verification ? (
+                  <span className={`tag ${content.research.verification.recommendation === "review" ? "warn" : "good"}`}>
+                    confidence {(content.research.verification.confidence * 100).toFixed(0)}% · {content.research.verification.recommendation}
+                  </span>
+                ) : null}
+              </div>
+              {content.research.verification?.recommendation === "review" ? (
+                <p className="tag warn" style={{ display: "block", marginBottom: ".5rem" }}>⚠ Low confidence — flagged for human review before publishing.</p>
+              ) : null}
+              {content.research.panel?.map((p) => (
+                <div key={p.lens} style={{ padding: ".4rem 0", borderBottom: "1px solid var(--panel-2)" }}>
+                  <div className="row" style={{ gap: ".4rem" }}><span className="tag accent">{p.lens}</span><span className="mono faint" style={{ fontSize: ".72rem" }}>conf {(p.confidence * 100).toFixed(0)}%</span></div>
+                  <div style={{ fontSize: ".88rem" }}>{p.summary}</div>
+                  {p.risks?.length ? <div className="faint" style={{ fontSize: ".78rem" }}>risks: {p.risks.join("; ")}</div> : null}
+                </div>
+              ))}
+              {content.research.verification?.missing_sources?.length ? (
+                <p className="faint" style={{ fontSize: ".78rem", marginTop: ".5rem" }}>Missing to raise confidence: {content.research.verification.missing_sources.join("; ")}</p>
+              ) : null}
+            </div>
+          ) : null}
 
           {/* Profile (private / pre-IPO names) */}
           {content.profile ? (

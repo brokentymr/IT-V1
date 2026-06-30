@@ -1,3 +1,4 @@
+import type { ResearchPanel, ResearchResult } from "../../lib/engines/research";
 import type { NewsAnalyzer, AnalyzeResult, ReadThroughResult } from "../../lib/engines/analyzer";
 import type { NewsArticle, NewsSource } from "../../lib/sources/news";
 import type { SourceResult } from "../../lib/sources/types";
@@ -21,6 +22,30 @@ export function fakeNews(byTicker: Record<string, NewsArticle[]>): NewsSource {
         missing: [],
         provenance: { origin: "fake", url: "x", retrieved_at: new Date().toISOString() },
       } as SourceResult<NewsArticle[]>;
+    },
+  };
+}
+
+/** A deterministic research panel: fixed thesis + verification (no live LLM). */
+export function fakeResearchPanel(opts: { confidence?: number; recommendation?: "auto" | "review" } = {}): ResearchPanel {
+  return {
+    async runResearch(): Promise<ResearchResult> {
+      return {
+        panel: [
+          { lens: "equity", summary: "Strong fundamentals.", key_points: ["margin"], claims: [{ statement: "revenue grew", basis: "XBRL", confidence: 0.9 }], risks: ["valuation"], confidence: 0.8 },
+          { lens: "sector", summary: "Leader.", key_points: ["share"], claims: [], risks: ["competition"], confidence: 0.75 },
+          { lens: "technology", summary: "Wide moat.", key_points: ["ecosystem"], claims: [], risks: ["disruption"], confidence: 0.8 },
+          { lens: "risk", summary: "Bear case: demand.", key_points: [], claims: [], risks: ["demand destruction"], confidence: 0.6 },
+        ],
+        thesis: {
+          one_liner: "Margin-led compounder", long_form: "Long.", actual_vs_expected: "Beat on revenue.",
+          tensions: ["China demand"], invalidation_triggers: ["Net margin < 22% for two quarters"], conviction: 4, claims_to_verify: ["revenue grew"],
+        },
+        verification: {
+          verdicts: [{ claim: "revenue grew", status: "supported", note: "XBRL confirms" }],
+          confidence: opts.confidence ?? 0.82, missing_sources: ["earnings call transcript"], recommendation: opts.recommendation ?? "auto",
+        },
+      };
     },
   };
 }

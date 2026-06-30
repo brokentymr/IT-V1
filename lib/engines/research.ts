@@ -1,0 +1,164 @@
+/**
+ * The analyst desk (reliability hardening, 2026-06-30). Tier-one research is multi-perspective,
+ * synthesized, and adversarially checked — not one generalist LLM call. This runs a panel of
+ * specialist lenses, has a head-of-research synthesize the house thesis, then a skeptic tries to
+ * REFUTE the load-bearing claims and scores confidence + missing sources (operationalizes spec §8:
+ * low confidence blocks auto-publish and routes to the human checkpoint).
+ *
+ * Model tiering (owner decision 2026-06-30): Sonnet for the expert lenses, Opus for synthesis and
+ * adversarial verification. Injectable so the engines stay deterministic in tests.
+ */
+import { z } from "zod";
+import { completeJSON } from "../llm/client";
+
+const LENS = z.enum(["equity", "sector", "technology", "risk"]);
+
+// Tolerant 0-1 confidence: models variously emit 0.85, 85 (percent), or "0.85". Normalize them.
+const Confidence = z.coerce.number().transform((n) => (n > 1 ? Math.min(1, n / 100) : Math.max(0, Math.min(1, n))));
+
+export const ExpertContribution = z.object({
+  lens: LENS,
+  summary: z.string(),
+  key_points: z.array(z.string()).default([]),
+  claims: z.array(z.object({ statement: z.string(), basis: z.string(), confidence: Confidence })).default([]),
+  risks: z.array(z.string()).default([]),
+  confidence: Confidence,
+});
+export type ExpertContribution = z.infer<typeof ExpertContribution>;
+
+export const ThesisSynthesis = z.object({
+  one_liner: z.string(),
+  long_form: z.string(),
+  actual_vs_expected: z.string().default(""),
+  tensions: z.array(z.string()).default([]),
+  invalidation_triggers: z.array(z.string()).min(1),
+  conviction: z.number().int().min(1).max(5),
+  claims_to_verify: z.array(z.string()).default([]),
+});
+export type ThesisSynthesis = z.infer<typeof ThesisSynthesis>;
+
+export const VerificationResult = z.object({
+  verdicts: z.array(z.object({ claim: z.string(), status: z.enum(["supported", "unverified", "contradicted"]), note: z.string() })).default([]),
+  confidence: Confidence,
+  missing_sources: z.array(z.string()).default([]),
+  recommendation: z.enum(["auto", "review"]),
+});
+export type VerificationResult = z.infer<typeof VerificationResult>;
+
+export interface ResearchContext {
+  company: { legal_name: string; ticker: string | null; gics_sector: string | null; listing: string };
+  evidence: string; // assembled by the caller: figures, drivers, scenario, consensus, profile, news
+  rolling_outlook?: string;
+  forward_expectations?: string | null;
+  research_focus?: string[];
+}
+
+export interface ResearchResult {
+  panel: ExpertContribution[];
+  thesis: ThesisSynthesis;
+  verification: VerificationResult;
+}
+
+export interface ResearchPanel {
+  runResearch(ctx: ResearchContext): Promise<ResearchResult>;
+}
+
+const focusNote = (focus?: string[]): string =>
+  focus?.length
+    ? `\n\nGive EXTRA WEIGHT to (without narrowing — keep full breadth): ${focus.map((f) => `"${f}"`).join(", ")}.`
+    : "";
+
+const LENSES: Record<z.infer<typeof LENS>, { persona: string; brief: string }> = {
+  equity: {
+    persona: "a tier-one buy-side equity analyst",
+    brief: "Assess fundamentals and earnings quality, valuation vs. the figures, capital allocation, balance-sheet health. Tie every point to a number where you can.",
+  },
+  sector: {
+    persona: "a sector strategist and competitive-dynamics expert",
+    brief: "Assess competitive position, market share, the value chain (suppliers/customers/substitutes), and supply-demand. Name specific competitors and where this company sits versus them.",
+  },
+  technology: {
+    persona: "a technology and product expert for this sector",
+    brief: "Assess product depth, roadmap, the durability of the moat, and disruption / substitution risk (including in-house or emerging-player threats). Be concrete about the technology.",
+  },
+  risk: {
+    persona: "a skeptical risk officer / short-seller building the bear case",
+    brief: "Build the strongest case AGAINST. Identify what would break the thesis, tail risks, governance, regulatory, accounting red flags. Be specific and measurable.",
+  },
+};
+
+function contextBlock(ctx: ResearchContext): string {
+  const c = ctx.company;
+  return `Company: ${c.legal_name} (${c.ticker ?? "unlisted"}) — sector ${c.gics_sector ?? "unknown"}, ${c.listing}.
+Rolling outlook: ${ctx.rolling_outlook || "(none)"}
+Forward expectations staged: ${ctx.forward_expectations ?? "(none)"}
+
+Evidence:
+${ctx.evidence}`;
+}
+
+export class ClaudeResearchPanel implements ResearchPanel {
+  async runResearch(ctx: ResearchContext): Promise<ResearchResult> {
+    const block = contextBlock(ctx);
+
+    // 1. Expert lenses — parallel, Sonnet.
+    const panel = (await Promise.all(
+      (Object.keys(LENSES) as Array<z.infer<typeof LENS>>).map((lens) =>
+        this.runLens(lens, block, ctx.research_focus).catch((e) => { console.warn(`[research] lens ${lens} failed: ${(e as Error).message}`); return null; })),
+    )).filter((x): x is ExpertContribution => x !== null);
+
+    // 2. Synthesis — Opus head-of-research.
+    const thesis = await this.synthesize(panel, block, ctx.research_focus);
+
+    // 3. Adversarial verification — Opus skeptic.
+    const verification = await this.verify(thesis, panel, block);
+
+    return { panel, thesis, verification };
+  }
+
+  private runLens(lens: z.infer<typeof LENS>, block: string, focus?: string[]): Promise<ExpertContribution> {
+    const { persona, brief } = LENSES[lens];
+    const prompt = `You are ${persona}. ${brief}${focusNote(focus)}
+
+${block}
+
+Return your contribution as JSON — be specific, do not pad. Keep summary to 2-3 sentences; at most
+5 key_points, 5 claims, 5 risks. For each material CLAIM give the basis and a confidence in [0,1]. JSON:
+{"lens": "${lens}", "summary": string, "key_points": [string],
+ "claims": [{"statement": string, "basis": string, "confidence": number}],
+ "risks": [string], "confidence": number}`;
+    return completeJSON({ prompt, schema: ExpertContribution, model: "claude-sonnet-4-6", purpose: `research.lens.${lens}`, maxTokens: 1800 });
+  }
+
+  private synthesize(panel: ExpertContribution[], block: string, focus?: string[]): Promise<ThesisSynthesis> {
+    const panelText = panel.map((p) => `### ${p.lens} (confidence ${p.confidence})\n${p.summary}\nKey: ${p.key_points.join("; ")}\nRisks: ${p.risks.join("; ")}`).join("\n\n");
+    const prompt = `You are the head of research. Synthesize the desk's panel into the house view — reconcile disagreements, do not just average. Keep long_form to ~5 sentences; each list to at most 5 short items. The invalidation triggers MUST be specific and measurable. List the load-bearing factual CLAIMS (at most 8) that should be fact-checked before publishing.${focusNote(focus)}
+
+${block}
+
+Panel:
+${panelText}
+
+Return JSON:
+{"one_liner": string, "long_form": string, "actual_vs_expected": string, "tensions": [string],
+ "invalidation_triggers": [string], "conviction": int 1-5, "claims_to_verify": [string]}`;
+    return completeJSON({ prompt, schema: ThesisSynthesis, model: "claude-opus-4-8", purpose: "research.synthesis", maxTokens: 2600 });
+  }
+
+  private verify(thesis: ThesisSynthesis, panel: ExpertContribution[], block: string): Promise<VerificationResult> {
+    const claims = [...new Set([...thesis.claims_to_verify, ...panel.flatMap((p) => p.claims.map((c) => c.statement))])].slice(0, 12);
+    const prompt = `You are a skeptical fact-checker and devil's advocate. For EACH claim below, judge it ONLY against the evidence provided: "supported" (the evidence backs it), "unverified" (plausible but the evidence here doesn't establish it), or "contradicted" (the evidence cuts against it). Do not be generous — default to "unverified" when the evidence is silent. Then give an overall confidence (0-1) in the thesis, list what additional sources are MISSING to raise confidence, and recommend "auto" only if confidence is high AND nothing is contradicted, else "review".
+
+${block}
+
+Thesis: ${thesis.one_liner} — ${thesis.long_form}
+
+Claims:
+${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+
+Return JSON:
+{"verdicts": [{"claim": string, "status": "supported|unverified|contradicted", "note": string}],
+ "confidence": number, "missing_sources": [string], "recommendation": "auto|review"}`;
+    return completeJSON({ prompt, schema: VerificationResult, model: "claude-opus-4-8", purpose: "research.verify", maxTokens: 3000 });
+  }
+}

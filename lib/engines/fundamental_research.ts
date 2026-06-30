@@ -17,13 +17,14 @@ import { NasdaqEarningsAdapter, resolveNextEarningsDate, type NextDate } from ".
 import type { PerplexityFinance } from "../sources/perplexity";
 import {
   extractStatements, buildModel, diffModels, stats,
-  metricYoYGrowths, netMarginLevels, priorYearBaseForNext, type FinancialModel,
+  metricYoYGrowths, netMarginLevels, priorYearBaseForNext, type FinancialModel, type SnapshotDiff,
 } from "../financials/model";
 import { simulateScenario, mulberry32, type ScenarioOutput } from "../financials/montecarlo";
 import { concentrationExcerpt, extractMdaSection } from "../financials/filing_text";
 import { FUNDAMENTALS_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
 import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
 import type { FundamentalsAnalyst } from "./fundamentals_analyst";
+import { ClaudeResearchPanel, type ResearchPanel } from "./research";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
 
@@ -33,13 +34,14 @@ interface CompanyRow {
   primary_ticker: string;
   cik: string | null;
   gics_sector: string | null;
+  listing: string;
   coverage: { positions_held?: unknown[]; next_earnings_date?: string | null; next_earnings_date_override?: string | null; research_focus?: string[] };
   next_earnings_date: string | null;
 }
 
 async function loadCompany(companyId: string): Promise<CompanyRow | null> {
   const { rows } = await query<CompanyRow>(
-    `SELECT id, legal_name, primary_ticker, cik, gics_sector, coverage,
+    `SELECT id, legal_name, primary_ticker, cik, gics_sector, listing, coverage,
             to_char(next_earnings_date,'YYYY-MM-DD') AS next_earnings_date
        FROM companies WHERE id = $1`,
     [companyId],
@@ -185,6 +187,8 @@ export interface CoverageResult {
   read_through_notes: number;
   drivers_extracted: number;
   scenario: ScenarioOutput | null;
+  confidence: number;
+  needs_review: boolean;
 }
 
 export async function runCoveragePass(opts: {
@@ -193,6 +197,7 @@ export async function runCoveragePass(opts: {
   formType?: string | null;
   filingUrl?: string | null;
   analyst: FundamentalsAnalyst;
+  panel?: ResearchPanel; // the analyst desk (multi-expert + synthesis + adversarial verify)
   newsAnalyzer?: NewsAnalyzer; // for read-through; omit to skip
   finance?: PerplexityFinance; // advisory consensus + analyst view; omit to skip
   sec?: SecAdapter;
@@ -225,16 +230,6 @@ export async function runCoveragePass(opts: {
 
   // 3. Advisory market context (Perplexity/Fiscal.ai) + thesis narration over the figures.
   const mc = opts.finance ? await fetchMarketContext(opts.finance, company.primary_ticker) : null;
-  const draft = await opts.analyst.draftThesis({
-    company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector },
-    filing: { form: opts.formType ?? "Filing", accession: opts.accession, period: model.fiscal_period },
-    model, diff,
-    rolling_outlook: cf.rolling_outlook,
-    forward_expectations: cf.forward?.expectations ?? null,
-    market_context: mc ? { consensus: mc.consensus, analyst_view: mc.analyst_view } : undefined,
-    research_focus: company.coverage?.research_focus,
-  });
-
   // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment).
   let html: string | null = null;
   if (opts.filingUrl) {
@@ -255,6 +250,17 @@ export async function runCoveragePass(opts: {
     }
   }
   const scenario = buildScenario(facts.data, model, drivers, mc?.consensus ?? null, company, config, opts.rng);
+
+  // 3d. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification.
+  const panel = opts.panel ?? new ClaudeResearchPanel();
+  const research = await panel.runResearch({
+    company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector, listing: company.listing },
+    evidence: buildEvidence(model, diff, drivers, scenario, mc, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`),
+    rolling_outlook: cf.rolling_outlook,
+    forward_expectations: cf.forward?.expectations ?? null,
+    research_focus: company.coverage?.research_focus,
+  });
+  const synth = research.thesis;
 
   const asOf = opts.asOf ?? model.period_end ?? todayIso();
   const cycleLabel = `${opts.formType ?? "Filing"} ${model.fiscal_period ?? asOf}`;
@@ -286,14 +292,21 @@ export async function runCoveragePass(opts: {
     }
 
     const thesis = Thesis.parse({
-      one_liner: draft.one_liner,
-      long_form: `${draft.long_form}\n\nActual vs expected: ${draft.actual_vs_expected}`,
-      tensions: draft.tensions,
+      one_liner: synth.one_liner,
+      long_form: `${synth.long_form}${synth.actual_vs_expected ? `\n\nActual vs expected: ${synth.actual_vs_expected}` : ""}`,
+      tensions: synth.tensions,
       catalysts: [],
-      invalidation_triggers: draft.invalidation_triggers,
-      conviction: draft.conviction,
+      invalidation_triggers: synth.invalidation_triggers,
+      conviction: synth.conviction,
       positions_held: (company.coverage?.positions_held as never[]) ?? [],
     });
+
+    // The desk's work product: the panel contributions + the adversarial verification (confidence + gaps).
+    const researchBlock = {
+      panel: research.panel,
+      verification: research.verification,
+      provenance: [{ claim_id: "research", source_ref: sourceId }],
+    };
 
     // MD&A hypotheses (#3) + Monte Carlo scenario (#4), both provenance-stamped to the filing.
     const hypothesesBlock = drivers.length
@@ -312,15 +325,16 @@ export async function runCoveragePass(opts: {
       ...(marketContext ? { market_context: marketContext } : {}),
       ...(hypothesesBlock ? { hypotheses: hypothesesBlock } : {}),
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
+      research: researchBlock,
       thesis,
       events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
     };
 
     await client.query(
       `INSERT INTO canonical_snapshots
-         (snapshot_id, canonical_file_id, company_id, as_of, cycle_label, trigger, conviction, filing_ref, content, diff)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [snapshotId, cf.id, company.id, asOf, cycleLabel, trigger, draft.conviction, opts.accession,
+         (snapshot_id, canonical_file_id, company_id, as_of, cycle_label, trigger, conviction, confidence, filing_ref, content, diff)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [snapshotId, cf.id, company.id, asOf, cycleLabel, trigger, synth.conviction, research.verification.confidence, opts.accession,
         JSON.stringify(content), JSON.stringify(diff)],
     );
   });
@@ -345,18 +359,40 @@ export async function runCoveragePass(opts: {
   if (opts.newsAnalyzer) {
     const rt = await propagateReadThrough(opts.newsAnalyzer, {
       noteId: snapshotId, companyId: company.id, companyName: company.legal_name,
-      headline: `${company.legal_name} filed ${opts.formType ?? "a filing"}: ${draft.one_liner}`,
-      summary: draft.actual_vs_expected, category: "guidance", sourceRef: null,
+      headline: `${company.legal_name} filed ${opts.formType ?? "a filing"}: ${synth.one_liner}`,
+      summary: synth.actual_vs_expected || synth.one_liner, category: "guidance", sourceRef: null,
     }).catch((e) => { console.warn(`[coverage] read-through failed: ${(e as Error).message}`); return { notesCreated: 0, reached: [] }; });
     readThroughNotes = rt.notesCreated;
   }
 
   return {
     company_id: company.id, snapshot_id: snapshotId, as_of: asOf, cycle_label: cycleLabel,
-    conviction: draft.conviction, metrics_extracted: Object.keys(line_items).length,
+    conviction: synth.conviction, metrics_extracted: Object.keys(line_items).length,
     missing_metrics: missing, links_enriched: linksEnriched, read_through_notes: readThroughNotes,
     drivers_extracted: drivers.length, scenario,
+    confidence: research.verification.confidence,
+    needs_review: research.verification.recommendation === "review",
   };
+}
+
+/** Assemble the evidence the analyst desk reasons over (figures are ground truth; the rest advisory). */
+function buildEvidence(
+  model: FinancialModel, diff: SnapshotDiff, drivers: Driver[], scenario: ScenarioOutput | null,
+  mc: MarketContextData | null, filingLabel: string,
+): string {
+  const b = (n: number) => (Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
+  const lines: string[] = [`Filing: ${filingLabel}.`];
+  const li = Object.values(model.line_items).map((x) => `${x.label} ${x.unit === "USD/shares" ? x.value.toFixed(2) : b(x.value)}${x.yoy ? ` (YoY ${(x.yoy.change_pct * 100).toFixed(1)}%)` : ""}`);
+  if (li.length) lines.push(`Figures (XBRL — ground truth): ${li.join("; ")}`);
+  const ratios = Object.entries(model.ratios).map(([k, v]) => `${k.replace("_", " ")} ${(v * 100).toFixed(1)}%`);
+  if (ratios.length) lines.push(`Margins: ${ratios.join(", ")}`);
+  const ch = diff.metrics.filter((m) => m.change_pct != null).map((m) => `${m.label} ${m.direction} ${((m.change_pct as number) * 100).toFixed(1)}%`);
+  if (ch.length) lines.push(`Change vs prior snapshot: ${ch.join(", ")}`);
+  if (drivers.length) lines.push(`MD&A drivers: ${drivers.map((d) => `${d.name} (${d.metric}, ${d.direction})`).join("; ")}`);
+  if (scenario?.bands?.revenue) lines.push(`Monte Carlo next period: revenue P10/P50/P90 ${b(scenario.bands.revenue.p10)}/${b(scenario.bands.revenue.p50)}/${b(scenario.bands.revenue.p90)}; P(beat rev) ${scenario.beat_probability.revenue ?? "—"}; top driver ${scenario.sensitivity[0]?.driver ?? "—"}`);
+  if (mc?.consensus) lines.push(`Consensus (Perplexity/Fiscal.ai): ${JSON.stringify(mc.consensus)}`);
+  if (mc?.analyst_view) lines.push(`Analyst view: ${JSON.stringify(mc.analyst_view)}`);
+  return lines.join("\n");
 }
 
 /** Build the Monte Carlo next-period scenario from MD&A drivers + XBRL history + consensus. */

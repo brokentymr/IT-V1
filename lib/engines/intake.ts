@@ -21,6 +21,10 @@ export const ResolvedEntity = z.object({
   exchange: z.string().nullable(),
   sector: z.string().nullable(),
   rationale: z.string(),
+  // Filled by EDGAR verification (not the LLM): the system's ground-truth on identity/listing.
+  cik: z.string().nullable().optional(),
+  verified: z.boolean().optional(),
+  verification: z.string().optional(),
 });
 export type ResolvedEntity = z.infer<typeof ResolvedEntity>;
 export const ResolveResult = z.object({
@@ -30,12 +34,36 @@ export const ResolveResult = z.object({
 });
 export type ResolveResult = z.infer<typeof ResolveResult>;
 
-/** Resolve free-text intent to concrete companies (names + tickers + listing status). */
+/**
+ * Verify one proposed entity against SEC EDGAR ground truth — the LLM PROPOSES, the system DECIDES.
+ * Order: a given ticker → the ticker index by name (listed) → an S-1 filer (pre-IPO) → unverified.
+ * This is what catches an LLM mislabeling a public company as private (e.g. Cerebras → listed).
+ */
+export async function verifyEntity(e: ResolvedEntity, sec: SecAdapter): Promise<ResolvedEntity> {
+  if (e.ticker) {
+    const r = await sec.resolveTicker(e.ticker);
+    if (r.ok && r.data) return { ...e, ticker: r.data.ticker, listing: "listed", cik: r.data.cik, verified: true, verification: `ticker ${r.data.ticker} confirmed in SEC index` };
+  }
+  const byName = await sec.resolveByName(e.name);
+  if (byName.ok && byName.data) {
+    return { ...e, ticker: byName.data.ticker, listing: "listed", cik: byName.data.cik, verified: true,
+      verification: `name matches listed filer ${byName.data.ticker} (CIK ${byName.data.cik})` };
+  }
+  const s1 = await sec.searchByName(e.name, { forms: "S-1,S-1/A" });
+  if (s1.ok && s1.data) {
+    return { ...e, ticker: null, listing: "pre_ipo", cik: s1.data.cik, verified: true, verification: `S-1 filer (CIK ${s1.data.cik})` };
+  }
+  return { ...e, cik: null, verified: false,
+    verification: e.listing === "listed" ? "claimed listed but absent from SEC EDGAR (likely a foreign exchange) — unverified" : "not in SEC EDGAR — unverified, treated as private" };
+}
+
+/** Resolve free-text intent to concrete companies, then VERIFY each against SEC EDGAR ground truth. */
 export async function resolveEntities(
   text: string,
-  opts: { client?: PerplexityClient; max?: number } = {},
+  opts: { client?: PerplexityClient; sec?: SecAdapter; max?: number } = {},
 ): Promise<{ entities: ResolvedEntity[]; research_focus: string[]; error?: string }> {
   const client = opts.client ?? new PerplexityClient();
+  const sec = opts.sec ?? new SecAdapter();
   const max = opts.max ?? 12;
   const question = `A research operator wants to add assets to a coverage universe. Their request:
 """${text}"""
@@ -68,8 +96,9 @@ completeness over a literal minimal reading.`;
 
   const r = await client.askJSON({ question, schema: ResolveResult, maxTokens: 1500, purpose: "intake.resolve" });
   if (!r.ok || !r.data) return { entities: [], research_focus: [], error: r.missing.join("; ") || r.error };
-  // Normalize tickers; cap the list.
-  const entities = r.data.entities.slice(0, max).map((e) => ({ ...e, ticker: e.ticker ? e.ticker.toUpperCase() : null }));
+  // Normalize tickers, cap, then verify each against EDGAR ground truth (in parallel).
+  const proposed = r.data.entities.slice(0, max).map((e) => ({ ...e, ticker: e.ticker ? e.ticker.toUpperCase() : null }));
+  const entities = await Promise.all(proposed.map((e) => verifyEntity(e, sec).catch(() => e)));
   return { entities, research_focus: r.data.research_focus };
 }
 
@@ -140,15 +169,15 @@ export async function addResolvedEntity(
     }
   }
 
-  // Pre-IPO → look for an S-1 filer on EDGAR; if found, ingest by CIK and run coverage on the S-1.
+  // Pre-IPO → use the verified CIK (or look up an S-1 filer), ingest by CIK, run coverage on the S-1.
   if (e.listing === "pre_ipo") {
-    const found = await sec.searchByName(e.name, { forms: "S-1,S-1/A" });
-    if (found.ok && found.data) {
+    const cik = e.cik ?? (await sec.searchByName(e.name, { forms: "S-1,S-1/A" })).data?.cik ?? null;
+    if (cik) {
       try {
-        const res = await ingestByCik(found.data.cik, { sec, listing: "pre_ipo" });
+        const res = await ingestByCik(cik, { sec, listing: "pre_ipo" });
         await storeFocus(res.company_id, opts.research_focus);
-        if (autoRun) await enqueueCoverage(res.company_id, found.data.cik, sec, queue).catch(() => null);
-        return { name: e.name, company_id: res.company_id, listing: "pre_ipo", result: res.status === "created" ? "ingested" : "exists", research: autoRun ? "coverage" : "none", detail: `S-1 filer (CIK ${found.data.cik})` };
+        if (autoRun) await enqueueCoverage(res.company_id, cik, sec, queue).catch(() => null);
+        return { name: e.name, company_id: res.company_id, listing: "pre_ipo", result: res.status === "created" ? "ingested" : "exists", research: autoRun ? "coverage" : "none", detail: `S-1 filer (CIK ${cik})` };
       } catch { /* fall through to a profile */ }
     }
     return profileFallback(e, queue, autoRun, opts.research_focus);

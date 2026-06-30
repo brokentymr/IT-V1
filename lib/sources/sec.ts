@@ -125,6 +125,16 @@ export class SecAdapter {
     private readonly fetchText: TextFetcher = liveTextFetcher,
   ) {}
 
+  // Cache the ~1MB ticker index per instance (intake verifies many entities in one request).
+  private tickersBody?: Record<string, { cik_str: number; ticker: string; title: string }>;
+  private async tickerIndex(): Promise<Record<string, { cik_str: number; ticker: string; title: string }> | null> {
+    if (this.tickersBody) return this.tickersBody;
+    const { status, body } = await this.fetchJson(TICKERS_URL);
+    if (status !== 200 || !body || typeof body !== "object") return null;
+    this.tickersBody = body as Record<string, { cik_str: number; ticker: string; title: string }>;
+    return this.tickersBody;
+  }
+
   /** Resolve a ticker symbol to its CIK + title via company_tickers.json. */
   async resolveTicker(ticker: string): Promise<SourceResult<{ cik: string; title: string; ticker: string }>> {
     const stamp: ProvenanceStamp = { origin: ORIGIN, url: TICKERS_URL, retrieved_at: new Date().toISOString() };
@@ -145,6 +155,39 @@ export class SecAdapter {
         }
       }
       return { ok: false, data: null, missing: [`ticker ${want} not found in SEC universe`], provenance: stamp };
+    } catch (err) {
+      return { ok: false, data: null, missing: ["SEC ticker index unreachable"], provenance: stamp, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Resolve a company NAME to its ticker/CIK by scanning the SEC ticker index (company_tickers.json
+   * lists every exchange-traded filer). Authoritative for "is this name publicly listed?" — used to
+   * verify/override an LLM's listing guess. Returns the best title match above a confidence bar.
+   */
+  async resolveByName(name: string): Promise<SourceResult<{ cik: string; ticker: string; title: string }>> {
+    const stamp: ProvenanceStamp = { origin: ORIGIN, url: TICKERS_URL, retrieved_at: new Date().toISOString() };
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\b(inc|incorporated|corp|corporation|company|co|ltd|limited|llc|lp|plc|holdings?|group|systems?|technologies|technology|the)\b/g, " ")
+      .replace(/\s+/g, " ").trim();
+    try {
+      const index = await this.tickerIndex();
+      if (!index) return { ok: false, data: null, missing: ["company_tickers.json unavailable"], provenance: stamp };
+      const want = norm(name);
+      if (!want) return { ok: false, data: null, missing: ["empty name"], provenance: stamp };
+      let best: { cik: string; ticker: string; title: string; score: number } | null = null;
+      for (const row of Object.values(index)) {
+        if (!row?.title) continue;
+        const t = norm(row.title);
+        let score = 0;
+        if (t === want) score = 4;
+        else if (t.startsWith(`${want} `) || t === want) score = 3;
+        else if (want.startsWith(`${t} `)) score = 2;
+        else if (t.split(" ")[0] === want.split(" ")[0] && want.split(" ")[0].length >= 4) score = 1;
+        if (score > (best?.score ?? 0)) best = { cik: cik10(row.cik_str), ticker: row.ticker.toUpperCase(), title: row.title, score };
+      }
+      if (!best || best.score < 2) return { ok: false, data: null, missing: [`no listed filer named "${name}"`], provenance: stamp };
+      return { ok: true, data: { cik: best.cik, ticker: best.ticker, title: best.title }, missing: [], provenance: stamp };
     } catch (err) {
       return { ok: false, data: null, missing: ["SEC ticker index unreachable"], provenance: stamp, error: (err as Error).message };
     }

@@ -1,6 +1,6 @@
 import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import { createEphemeralDb, type Ephemeral } from "./helpers/ephemeral-db";
-import { fakeAnalyzer } from "./helpers/fakes";
+import { fakeAnalyzer, fakeResearchPanel } from "./helpers/fakes";
 import { setPool } from "../lib/db/pool";
 import { SecAdapter } from "../lib/sources/sec";
 import type { JsonFetcher, TextFetcher } from "../lib/sources/types";
@@ -123,18 +123,20 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
   it("extracts a grounded snapshot with thesis + diff, enriches links, and reads through", async () => {
     const r = await runCoveragePass({
       companyId: id.AAPL, accession: ACC, formType: "10-Q", filingUrl: "https://sec.gov/x/aapl-20240629.htm",
-      analyst, newsAnalyzer, finance, sec, trigger: "manual", rng: mulberry32(42),
+      analyst, panel: fakeResearchPanel(), newsAnalyzer, finance, sec, trigger: "manual", rng: mulberry32(42),
     });
 
     expect(r.metrics_extracted).toBe(2);            // revenue + net_income
     expect(r.drivers_extracted).toBe(2);            // MD&A drivers (#3)
     expect(r.scenario).not.toBeNull();              // Monte Carlo scenario (#4)
+    expect(r.confidence).toBeGreaterThan(0);        // adversarial verification confidence
+    expect(r.needs_review).toBe(false);             // recommendation 'auto' from the fake panel
     expect(r.conviction).toBe(4);
     expect(r.links_enriched).toBe(1);               // AAPL→DELL created from filing text
     expect(r.read_through_notes).toBe(1);           // HPQ only (DELL gated immaterial)
 
     const snap = await db.pool.query(
-      "SELECT cycle_label, trigger, conviction, filing_ref, content, diff FROM canonical_snapshots WHERE company_id=$1",
+      "SELECT cycle_label, trigger, conviction, confidence, filing_ref, content, diff FROM canonical_snapshots WHERE company_id=$1",
       [id.AAPL],
     );
     expect(snap.rowCount).toBe(1);
@@ -150,6 +152,10 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
     expect(row.content.market_context.consensus.revenue_estimate_usd).toBe(94_000_000_000);
     expect(row.content.market_context.analyst_view.economic_moat).toBe("wide");
     expect(row.content.market_context.provenance[0].source_ref).toBeTruthy();
+    // analyst desk: 4 expert lenses + adversarial verification stored, confidence promoted
+    expect(row.content.research.panel.length).toBe(4);
+    expect(row.content.research.verification.recommendation).toBe("auto");
+    expect(Number(row.confidence)).toBeGreaterThan(0);
     // MD&A hypotheses (#3) + Monte Carlo scenario (#4) stored on the snapshot
     expect(row.content.hypotheses.drivers.length).toBe(2);
     expect(row.content.hypotheses.provenance[0].source_ref).toBeTruthy();
@@ -184,7 +190,7 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
 
     const r2 = await runCoveragePass({
       companyId: id.AAPL, accession: ACC, formType: "10-Q", filingUrl: "https://sec.gov/x/aapl-20240629.htm",
-      analyst, newsAnalyzer, sec, trigger: "manual",
+      analyst, panel: fakeResearchPanel(), newsAnalyzer, sec, trigger: "manual",
     });
 
     const after = await db.pool.query(

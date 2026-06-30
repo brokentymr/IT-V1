@@ -6,7 +6,7 @@ import { setPool } from "../lib/db/pool";
 import { SecAdapter } from "../lib/sources/sec";
 import type { JsonFetcher } from "../lib/sources/types";
 import { PerplexityClient, type PerplexityFetcher } from "../lib/sources/perplexity";
-import { resolveEntities, addResolvedEntity, createUnlistedCompany } from "../lib/engines/intake";
+import { resolveEntities, verifyEntity, addResolvedEntity, createUnlistedCompany } from "../lib/engines/intake";
 import { runPrivateProfile } from "../lib/engines/private_profile";
 
 const RESOLVE_JSON = JSON.stringify({
@@ -40,12 +40,25 @@ describe("agentic intake (integration)", () => {
   beforeAll(async () => { db = await createEphemeralDb(); setPool(db.pool); });
   afterAll(async () => { setPool(undefined); await db.drop(); });
 
-  it("resolves free text to entities + research focus (tickers normalized)", async () => {
-    const r = await resolveEntities("Apple device price increases and a private peer", { client });
+  it("resolves free text to entities + research focus (verified against EDGAR)", async () => {
+    const r = await resolveEntities("Apple device price increases and a private peer", { client, sec: fixtureSec() });
     expect(r.entities.length).toBe(2);
     expect(r.entities[0]).toMatchObject({ name: "Apple Inc.", ticker: "AAPL", listing: "listed" });
     expect(r.entities[1]).toMatchObject({ name: "SpaceX", ticker: null, listing: "private" });
     expect(r.research_focus).toContain("device price increases");
+    // EDGAR verification ran: Apple confirmed listed; SpaceX absent from EDGAR → unverified.
+    expect(r.entities[0].verified).toBe(true);
+    expect(r.entities[1].verified).toBe(false);
+  });
+
+  it("verifyEntity corrects an LLM mislabel: a public name claimed 'private' → listed (the Cerebras class)", async () => {
+    const corrected = await verifyEntity(
+      { name: "Apple", ticker: null, listing: "private", exchange: null, sector: null, rationale: "llm guessed wrong" },
+      fixtureSec(),
+    );
+    expect(corrected.listing).toBe("listed");      // EDGAR ground truth overrides the LLM
+    expect(corrected.ticker).toBe("AAPL");
+    expect(corrected.verified).toBe(true);
   });
 
   it("adds a PRE-IPO S-1 filer by CIK (not as a profile-only private name)", async () => {
