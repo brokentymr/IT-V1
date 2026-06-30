@@ -1,15 +1,28 @@
-# Investing Together — reverse proxy with automatic HTTPS (Phase 2).
+# Investing Together — reverse proxy with automatic HTTPS (Phase 2) + console auth (Phase 5).
 {
 	email brokentymr@gmail.com
 }
 
 # The platform + webhook host. Caddy auto-issues + renews a Let's Encrypt cert and
-# redirects HTTP→HTTPS. Webhooks land at https://markets.kuramoto.io/api/webhooks/*.
+# redirects HTTP→HTTPS.
 markets.kuramoto.io {
 	encode gzip
 	log {
 		output file /var/log/caddy/access.log
 		format json
 	}
-	reverse_proxy localhost:3000
+
+	# Webhooks authenticate with their own signed secrets — they must stay UNAUTHENTICATED
+	# (TradingView/EDGAR can't send a basic-auth header). Everything else (the operator console)
+	# is gated behind HTTP basic auth, since it exposes research and can trigger paid runs.
+	@webhooks path /api/webhooks/*
+	handle @webhooks {
+		reverse_proxy localhost:3000
+	}
+	handle {
+		basic_auth {
+			operator $2a$14$mMiabt.auwRWB55OBdLpduUXYaLvv.p2Gjr..K6WjD.6QXXDT.Fbm
+		}
+		reverse_proxy localhost:3000
+	}
 }
