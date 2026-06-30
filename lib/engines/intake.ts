@@ -40,11 +40,19 @@ export async function resolveEntities(
   const question = `A research operator wants to add assets to a coverage universe. Their request:
 """${text}"""
 
-Identify the SPECIFIC companies this refers to. Rules:
-- If they name one or more companies, resolve each (including informal names, e.g. "Google" → Alphabet).
-- If they name a SECTOR, THEME, or ask to "drill into" an area, list the most relevant individual
-  companies in it (up to ${max}), favoring the notable / investable names.
-- Include public AND private/pre-IPO companies where relevant.
+Resolve like a sell-side analyst mapping the full competitive landscape and value chain — NOT just
+the literal headline names. Rules:
+- If they name one or more companies, resolve each (informal names too, e.g. "Google" → Alphabet).
+- If they imply COMPETITORS or a SECTOR / THEME (or ask to "drill into" an area), surface the real
+  investable landscape (up to ${max}) and do not stop at the obvious direct rivals. Include, where
+  they genuinely belong in the conversation: (a) direct competitors; (b) SUBSTITUTE / in-house
+  threats — e.g. hyperscaler custom silicon like Alphabet's TPUs or Amazon's Trainium; and (c) the
+  key ADJACENT value-chain players that move on the same thesis — e.g. for AI-datacenter compute:
+  HBM/memory (Micron, SK Hynix), storage (SanDisk / Western Digital), ASIC design partners
+  (Broadcom, Marvell), foundry (TSMC), networking. If the operator names a number ("two biggest"),
+  treat it as the CORE but still surface the other materially-relevant names — the operator selects
+  which to keep.
+- Include public AND private / pre-IPO companies where relevant.
 For each company give: legal/common name; stock ticker if publicly listed (else null); listing =
 "listed" | "pre_ipo" | "private" (use "pre_ipo" for companies that have filed to go public, e.g. an
 S-1); primary exchange (or null); GICS sector (or null); a one-line rationale.
@@ -53,7 +61,10 @@ ALSO extract any RESEARCH FOCUS the operator specified — specific factors, top
 want the analysis to emphasize (e.g. "device price increases", "demand destruction risk", "China
 exposure"). If none is stated, return an empty list.
 Return JSON: {"entities": [{"name": string, "ticker": string|null, "listing": "listed|pre_ipo|private",
-"exchange": string|null, "sector": string|null, "rationale": string}], "research_focus": [string]}`;
+"exchange": string|null, "sector": string|null, "rationale": string}], "research_focus": [string]}
+In each rationale, state WHERE the company sits in the landscape (direct rival / custom-silicon
+substitute / memory / storage / foundry / networking / etc.) and why it matters. Favor analytical
+completeness over a literal minimal reading.`;
 
   const r = await client.askJSON({ question, schema: ResolveResult, maxTokens: 1500, purpose: "intake.resolve" });
   if (!r.ok || !r.data) return { entities: [], research_focus: [], error: r.missing.join("; ") || r.error };
