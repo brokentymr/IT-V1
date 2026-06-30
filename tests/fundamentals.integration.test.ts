@@ -8,6 +8,7 @@ import type { FundamentalsAnalyst } from "../lib/engines/fundamentals_analyst";
 import { PerplexityClient, PerplexityFinance, type PerplexityFetcher } from "../lib/sources/perplexity";
 import { mulberry32 } from "../lib/financials/montecarlo";
 import { runCoveragePass, runForwardPass } from "../lib/engines/fundamental_research";
+import { accumulateArea, loadOpenAreas } from "../lib/engines/areas_of_interest";
 
 const AAPL_CIK = "0000320193";
 const ACC = "0000320193-24-000081";
@@ -204,6 +205,28 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
     // second snapshot's diff is computed against the first snapshot's model → revenue flat
     const second = after.rows.find((x) => x.snapshot_id === r2.snapshot_id)!;
     expect(second.diff.metrics.find((m: { key: string }) => m.key === "revenue").direction).toBe("flat");
+  });
+
+  it("the coverage pass adjudicates open areas of interest: resolves the addressed one", async () => {
+    // Two between-filing areas accumulated from the headlines.
+    await accumulateArea({ companyId: id.AAPL, category: "product", band: "major", score: 78, headline: "Device price increase rattles the street", url: "u1", summary: "prices up" });
+    await accumulateArea({ companyId: id.AAPL, category: "management", band: "material", score: 60, headline: "Incoming CEO named", url: "u2", summary: "leadership change" });
+    expect((await loadOpenAreas(id.AAPL)).length).toBe(2);
+
+    const r = await runCoveragePass({
+      companyId: id.AAPL, accession: ACC, formType: "10-Q", filingUrl: "https://sec.gov/x/aapl-20240629.htm",
+      analyst, panel: fakeResearchPanel({ areaVerdict: (theme) => (theme === "product" ? "overreaction" : "carry_forward") }),
+      newsAnalyzer, sec, trigger: "manual",
+    });
+    expect(r.areas_addressed).toBe(2);
+    expect(r.areas_resolved).toBe(1);   // product → overreaction (resolved)
+    expect(r.areas_carried).toBe(1);    // management → carried to next quarter
+
+    const open = await loadOpenAreas(id.AAPL);
+    expect(open.length).toBe(1);                       // product resolved out
+    expect(open[0].theme).toBe("management");
+    const resolved = await db.pool.query("SELECT disposition FROM areas_of_interest WHERE company_id=$1 AND status='resolved'", [id.AAPL]);
+    expect(resolved.rows.some((x) => x.disposition === "overreaction")).toBe(true);
   });
 
   it("forward pass stages a forward note and resolves a next date via cadence", async () => {

@@ -10,6 +10,7 @@
  */
 import { z } from "zod";
 import { completeJSON } from "../llm/client";
+import { RESOLUTION_VERDICTS } from "./areas_of_interest";
 
 const LENS = z.enum(["equity", "sector", "technology", "risk"]);
 
@@ -59,8 +60,28 @@ export interface ResearchResult {
   verification: VerificationResult;
 }
 
+export const AreaResolution = z.object({
+  theme: z.string(),
+  verdict: z.enum(RESOLUTION_VERDICTS),
+  note: z.string(),
+});
+export type AreaResolution = z.infer<typeof AreaResolution>;
+
+export const AreaAdjudication = z.object({ resolutions: z.array(AreaResolution).default([]) });
+export type AreaAdjudication = z.infer<typeof AreaAdjudication>;
+
+export interface AdjudicateInput {
+  company: { legal_name: string; ticker: string | null };
+  thesis: ThesisSynthesis;
+  evidence: string;
+  areas: Array<{ theme: string; title: string; summary: string; mentions: number }>;
+}
+
 export interface ResearchPanel {
   runResearch(ctx: ResearchContext): Promise<ResearchResult>;
+  /** Adjudicate the open areas of interest now that this filing's analysis is in (Phase 5.5).
+   *  Optional so existing fakes/implementations keep working; the coverage pass skips when absent. */
+  adjudicateAreas?(input: AdjudicateInput): Promise<AreaAdjudication>;
 }
 
 const focusNote = (focus?: string[]): string =>
@@ -114,6 +135,37 @@ export class ClaudeResearchPanel implements ResearchPanel {
     const verification = await this.verify(thesis, panel, block);
 
     return { panel, thesis, verification };
+  }
+
+  async adjudicateAreas(input: AdjudicateInput): Promise<AreaAdjudication> {
+    if (!input.areas.length) return { resolutions: [] };
+    const areaList = input.areas
+      .map((a, i) => `${i + 1}. [${a.theme}] ${a.title}${a.mentions > 1 ? ` (×${a.mentions} headlines)` : ""}${a.summary ? ` — ${a.summary}` : ""}`)
+      .join("\n");
+    const prompt = `You are the head of research adjudicating OPEN AREAS OF INTEREST — material developments that
+accumulated from the headlines between filings — now that this filing's analysis is in. For EACH area,
+decide against the evidence and the house thesis:
+- "invalidated": the feared worst case (or hoped best case) is ruled out by the filing — the concern will NOT
+  materialize as the street feared. Resolve.
+- "confirmed": the development materialized and bears on the thesis. Resolve.
+- "overreaction": a nothing-burger — the market/street overreacted; no lasting thesis impact. Resolve.
+- "carry_forward": not yet conclusive; revisit next quarter before putting it to bed.
+- "leave_open": this filing does not speak to it at all.
+Ground each verdict in one sentence tied to the evidence. Be willing to call an overreaction when the numbers
+do not support the narrative.
+
+Company: ${input.company.legal_name} (${input.company.ticker ?? "unlisted"})
+House thesis: ${input.thesis.one_liner} — ${input.thesis.long_form}
+${input.thesis.actual_vs_expected ? `Actual vs expected: ${input.thesis.actual_vs_expected}` : ""}
+
+Evidence:
+${input.evidence}
+
+Open areas of interest:
+${areaList}
+
+Return JSON: {"resolutions": [{"theme": string, "verdict": "invalidated|confirmed|overreaction|carry_forward|leave_open", "note": string}]}`;
+    return completeJSON({ prompt, schema: AreaAdjudication, model: "claude-sonnet-4-6", purpose: "research.adjudicate_areas", maxTokens: 1500 });
   }
 
   private runLens(lens: z.infer<typeof LENS>, block: string, focus?: string[]): Promise<ExpertContribution> {

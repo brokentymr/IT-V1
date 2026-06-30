@@ -1,4 +1,5 @@
-import type { ResearchPanel, ResearchResult } from "../../lib/engines/research";
+import type { ResearchPanel, ResearchResult, AreaAdjudication } from "../../lib/engines/research";
+import type { ResolutionVerdict } from "../../lib/engines/areas_of_interest";
 import type { NewsAnalyzer, AnalyzeResult, ReadThroughResult } from "../../lib/engines/analyzer";
 import type { NewsArticle, NewsSource } from "../../lib/sources/news";
 import type { SourceResult } from "../../lib/sources/types";
@@ -27,8 +28,13 @@ export function fakeNews(byTicker: Record<string, NewsArticle[]>): NewsSource {
 }
 
 /** A deterministic research panel: fixed thesis + verification (no live LLM). */
-export function fakeResearchPanel(opts: { confidence?: number; recommendation?: "auto" | "review" } = {}): ResearchPanel {
+export function fakeResearchPanel(
+  opts: { confidence?: number; recommendation?: "auto" | "review"; areaVerdict?: (theme: string) => ResolutionVerdict } = {},
+): ResearchPanel {
   return {
+    async adjudicateAreas({ areas }): Promise<AreaAdjudication> {
+      return { resolutions: areas.map((a) => ({ theme: a.theme, verdict: opts.areaVerdict?.(a.theme) ?? "leave_open", note: `verdict for ${a.theme}` })) };
+    },
     async runResearch(): Promise<ResearchResult> {
       return {
         panel: [

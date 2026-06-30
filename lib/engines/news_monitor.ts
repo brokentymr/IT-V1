@@ -13,6 +13,7 @@ import { JOB, type Queue } from "../queue/types";
 import { bossQueue } from "../queue/boss";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
+import { accumulateArea } from "./areas_of_interest";
 
 const MONITORED_STATUSES = ["in_research", "in_review", "published", "monitoring"];
 
@@ -23,6 +24,8 @@ export interface MonitorResult {
   read_through_notes: number;
   escalations: number;
   skipped_duplicates: number;
+  areas_opened: number;
+  areas_accumulated: number;
 }
 
 interface CompanyRow {
@@ -46,6 +49,7 @@ export async function runDailyMonitor(opts: {
   const maxArticles = opts.maxArticles ?? MONITOR_CONFIG.maxArticlesPerCompany;
   const result: MonitorResult = {
     companies: 0, articles_seen: 0, notes_created: 0, read_through_notes: 0, escalations: 0, skipped_duplicates: 0,
+    areas_opened: 0, areas_accumulated: 0,
   };
 
   const companies = await query<CompanyRow>(
@@ -105,6 +109,15 @@ export async function runDailyMonitor(opts: {
         if (!topOutlook || a.importance_score > topOutlook.score) {
           topOutlook = { score: a.importance_score, outlook: a.impact.forward_outlook };
         }
+
+        // Material/major headline → open or accumulate an Area of Interest (clustered by category).
+        // This is the between-filing tracker the filing-triggered desk will later adjudicate.
+        const area = await accumulateArea({
+          companyId: company.id, category: a.category, band: band as "material" | "major", score: a.importance_score,
+          headline: article.title, url: article.url, summary: a.impact.forward_outlook,
+        }).catch((e) => { console.warn(`[monitor] area accumulate failed: ${(e as Error).message}`); return null; });
+        if (area) result[area.created ? "areas_opened" : "areas_accumulated"]++;
+
         const rt = await propagateReadThrough(opts.analyzer, {
           noteId, companyId: company.id, companyName: company.legal_name,
           headline: article.title, summary: a.impact.forward_outlook, category: a.category, sourceRef: sourceId,

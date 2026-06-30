@@ -62,6 +62,25 @@ export interface FeedNote {
   origin_company_id: string | null;
 }
 
+export interface AreaRow {
+  id: string;
+  theme: string;
+  title: string;
+  summary: string | null;
+  category: string;
+  band: string;
+  score: number;
+  mentions: number;
+  status: string;
+  disposition: string | null;
+  resolution_note: string | null;
+  revisit_after: string | null;
+  opened_at: string;
+  resolved_at: string | null;
+  resolved_by_accession: string | null;
+  headlines: Array<{ headline: string; url: string | null; detected_at: string | null }>;
+}
+
 export interface CompanyDetail {
   header: CompanyHeader;
   latest: SnapshotRow | null;
@@ -70,6 +89,7 @@ export interface CompanyDetail {
   relationships: RelationshipRow[];
   feed: FeedNote[];
   signals: Array<{ ts: string; kind: string; payload: Record<string, unknown> }>;
+  areas: { open: AreaRow[]; resolved: AreaRow[] };
 }
 
 export async function getCompanyDetail(id: string): Promise<CompanyDetail | null> {
@@ -135,9 +155,27 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     [id],
   );
 
+  // Areas of interest: open/carried first (the live tracker), then recently resolved (the audit trail).
+  const areaRows = await query<AreaRow>(
+    `SELECT id, theme, title, summary, category, band, score, mentions, status, disposition,
+            resolution_note, to_char(revisit_after,'YYYY-MM-DD') AS revisit_after,
+            to_char(opened_at,'YYYY-MM-DD"T"HH24:MI:SS') AS opened_at,
+            to_char(resolved_at,'YYYY-MM-DD"T"HH24:MI:SS') AS resolved_at,
+            resolved_by_accession, COALESCE(headlines,'[]') AS headlines
+       FROM areas_of_interest
+      WHERE company_id = $1
+      ORDER BY (status <> 'resolved') DESC, score DESC, updated_at DESC
+      LIMIT 40`,
+    [id],
+  );
+
   return {
     header, latest,
     snapshots: snaps.rows.map((s) => ({ snapshot_id: s.snapshot_id, as_of: s.as_of, cycle_label: s.cycle_label, conviction: s.conviction })),
     approval, relationships: rels.rows, feed: feed.rows, signals: signals.rows,
+    areas: {
+      open: areaRows.rows.filter((a) => a.status !== "resolved"),
+      resolved: areaRows.rows.filter((a) => a.status === "resolved"),
+    },
   };
 }

@@ -31,7 +31,7 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const d = await getCompanyDetail(id);
   if (!d) notFound();
-  const { header: h, latest, approval, relationships, feed, signals } = d;
+  const { header: h, latest, approval, relationships, feed, signals, areas } = d;
   const content = (latest?.content ?? {}) as SnapContent;
   const diff = (latest?.diff ?? {}) as Diff;
   const sc = content.scenario;
@@ -78,6 +78,57 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
           <a href="/jobs" className="faint">watch pipeline →</a>
         </div>
       </div>
+
+      {/* Areas of interest — between-filing developments accumulate from the headlines and the
+          filing-triggered desk resolves them. The cluster of open items is the salience signal. */}
+      {(areas.open.length || areas.resolved.length) ? (
+        <div className="panel" style={{ marginTop: "1rem" }}>
+          <div className="spread">
+            <h2>Areas of interest</h2>
+            <span className={`tag ${areas.open.length ? "warn" : "good"}`}>{areas.open.length} open</span>
+          </div>
+          {areas.open.length === 0 ? <p className="faint" style={{ marginTop: 0 }}>No open areas — the desk is clear.</p> : null}
+          {areas.open.map((a) => (
+            <div key={a.id} style={{ padding: ".5rem 0", borderBottom: "1px solid var(--panel-2)" }}>
+              <div className="row" style={{ gap: ".4rem" }}>
+                <span className={`tag ${a.band === "major" ? "bad" : "warn"}`}>{a.band}</span>
+                <span className="tag">{a.category}</span>
+                {a.status === "carried_forward" ? <span className="tag accent">carried → revisit {a.revisit_after ?? "next quarter"}</span> : null}
+                {a.mentions > 1 ? <span className="mono faint" style={{ fontSize: ".72rem" }}>×{a.mentions} headlines</span> : null}
+                <span className="mono faint" style={{ fontSize: ".72rem" }}>score {a.score}</span>
+              </div>
+              <div style={{ fontSize: ".9rem", marginTop: ".15rem" }}>{a.title}</div>
+              {a.headlines.length > 1 ? (
+                <details style={{ marginTop: ".2rem" }}>
+                  <summary className="faint" style={{ cursor: "pointer", fontSize: ".75rem" }}>{a.headlines.length} accumulated headlines</summary>
+                  <ul className="list-tight faint" style={{ fontSize: ".78rem" }}>
+                    {a.headlines.map((hl, i) => <li key={i}>{hl.url ? <a href={hl.url}>{hl.headline}</a> : hl.headline}</li>)}
+                  </ul>
+                </details>
+              ) : null}
+              {a.status === "carried_forward" && a.resolution_note ? <div className="faint" style={{ fontSize: ".78rem", marginTop: ".2rem" }}>{a.resolution_note}</div> : null}
+            </div>
+          ))}
+          {areas.resolved.length ? (
+            <details style={{ marginTop: ".6rem" }}>
+              <summary className="muted" style={{ cursor: "pointer" }}>{areas.resolved.length} resolved</summary>
+              <div style={{ marginTop: ".4rem" }}>
+                {areas.resolved.map((a) => (
+                  <div key={a.id} style={{ padding: ".4rem 0", borderBottom: "1px solid var(--panel-2)" }}>
+                    <div className="row" style={{ gap: ".4rem" }}>
+                      <span className={`tag ${a.disposition === "invalidated" ? "good" : a.disposition === "confirmed" ? "accent" : ""}`}>{a.disposition ?? "resolved"}</span>
+                      <span className="tag">{a.category}</span>
+                      {a.resolved_by_accession ? <span className="mono faint" style={{ fontSize: ".7rem" }}>via {a.resolved_by_accession}</span> : null}
+                    </div>
+                    <div className="muted" style={{ fontSize: ".85rem" }}>{a.title}</div>
+                    {a.resolution_note ? <div className="faint" style={{ fontSize: ".78rem" }}>{a.resolution_note}</div> : null}
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="grid cols-2" style={{ marginTop: "1rem" }}>
         <div>

@@ -27,6 +27,7 @@ import type { FundamentalsAnalyst } from "./fundamentals_analyst";
 import { ClaudeResearchPanel, type ResearchPanel } from "./research";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
+import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_interest";
 
 interface CompanyRow {
   id: string;
@@ -189,6 +190,9 @@ export interface CoverageResult {
   scenario: ScenarioOutput | null;
   confidence: number;
   needs_review: boolean;
+  areas_addressed: number;
+  areas_resolved: number;
+  areas_carried: number;
 }
 
 export async function runCoveragePass(opts: {
@@ -251,11 +255,16 @@ export async function runCoveragePass(opts: {
   }
   const scenario = buildScenario(facts.data, model, drivers, mc?.consensus ?? null, company, config, opts.rng);
 
-  // 3d. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification.
+  // 3d. Open areas of interest — the between-filing developments the News Monitor accumulated. The
+  // desk reasons over them explicitly, then adjudicates which this filing resolves (step 7).
+  const openAreas = await loadOpenAreas(company.id);
+  const evidence = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`);
+
+  // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification.
   const panel = opts.panel ?? new ClaudeResearchPanel();
   const research = await panel.runResearch({
     company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector, listing: company.listing },
-    evidence: buildEvidence(model, diff, drivers, scenario, mc, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`),
+    evidence,
     rolling_outlook: cf.rolling_outlook,
     forward_expectations: cf.forward?.expectations ?? null,
     research_focus: company.coverage?.research_focus,
@@ -365,6 +374,27 @@ export async function runCoveragePass(opts: {
     readThroughNotes = rt.notesCreated;
   }
 
+  // 7. Adjudicate the open areas of interest: the desk resolves the ones this filing puts to bed
+  // (invalidated / confirmed / overreaction) and carries the rest to next quarter. Only the AOI
+  // status auto-resolves here — the thesis snapshot itself still awaits the §8 human checkpoint.
+  let areasResolved = 0;
+  let areasCarried = 0;
+  if (openAreas.length && panel.adjudicateAreas) {
+    const adj = await panel.adjudicateAreas({
+      company: { legal_name: company.legal_name, ticker: company.primary_ticker },
+      thesis: synth, evidence,
+      areas: openAreas.map((a) => ({ theme: a.theme, title: a.title, summary: a.summary, mentions: a.mentions })),
+    }).catch((e) => { console.warn(`[coverage] area adjudication failed: ${(e as Error).message}`); return null; });
+    if (adj) {
+      const applied = await applyResolutions({
+        companyId: company.id, accession: opts.accession, snapshotId,
+        revisitAfter: company.next_earnings_date, resolutions: adj.resolutions,
+      });
+      areasResolved = applied.resolved;
+      areasCarried = applied.carried;
+    }
+  }
+
   return {
     company_id: company.id, snapshot_id: snapshotId, as_of: asOf, cycle_label: cycleLabel,
     conviction: synth.conviction, metrics_extracted: Object.keys(line_items).length,
@@ -372,13 +402,14 @@ export async function runCoveragePass(opts: {
     drivers_extracted: drivers.length, scenario,
     confidence: research.verification.confidence,
     needs_review: research.verification.recommendation === "review",
+    areas_addressed: openAreas.length, areas_resolved: areasResolved, areas_carried: areasCarried,
   };
 }
 
 /** Assemble the evidence the analyst desk reasons over (figures are ground truth; the rest advisory). */
 function buildEvidence(
   model: FinancialModel, diff: SnapshotDiff, drivers: Driver[], scenario: ScenarioOutput | null,
-  mc: MarketContextData | null, filingLabel: string,
+  mc: MarketContextData | null, openAreas: OpenArea[], filingLabel: string,
 ): string {
   const b = (n: number) => (Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
   const lines: string[] = [`Filing: ${filingLabel}.`];
@@ -392,6 +423,9 @@ function buildEvidence(
   if (scenario?.bands?.revenue) lines.push(`Monte Carlo next period: revenue P10/P50/P90 ${b(scenario.bands.revenue.p10)}/${b(scenario.bands.revenue.p50)}/${b(scenario.bands.revenue.p90)}; P(beat rev) ${scenario.beat_probability.revenue ?? "—"}; top driver ${scenario.sensitivity[0]?.driver ?? "—"}`);
   if (mc?.consensus) lines.push(`Consensus (Perplexity/Fiscal.ai): ${JSON.stringify(mc.consensus)}`);
   if (mc?.analyst_view) lines.push(`Analyst view: ${JSON.stringify(mc.analyst_view)}`);
+  if (openAreas.length) {
+    lines.push(`Open areas of interest to address (accumulated from the headlines since the last filing): ${openAreas.map((a) => `[${a.theme}] ${a.title}${a.mentions > 1 ? ` (×${a.mentions})` : ""}`).join("; ")}`);
+  }
   return lines.join("\n");
 }
 
