@@ -21,7 +21,7 @@ markets.kuramoto.io {
 	}
 	handle {
 		basic_auth {
-			operator $2a$14$mMiabt.auwRWB55OBdLpduUXYaLvv.p2Gjr..K6WjD.6QXXDT.Fbm
+			operator $2a$14$WfZdJQXz4GaLQBmTw/1kouRMa0zmXcGxshaSEhLJbjQzoWF/jl/L2
 		}
 		reverse_proxy localhost:3000
 	}

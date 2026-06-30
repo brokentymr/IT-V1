@@ -14,6 +14,8 @@ const ORIGIN = "SEC EDGAR";
 const TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
 const SUBMISSIONS_URL = (cik10: string) => `https://data.sec.gov/submissions/CIK${cik10}.json`;
 const COMPANYFACTS_URL = (cik10: string) => `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik10}.json`;
+const FTS_URL = (q: string, forms: string) =>
+  `https://efts.sec.gov/LATEST/search-index?q=${encodeURIComponent(`"${q}"`)}&forms=${encodeURIComponent(forms)}`;
 
 function userAgent(): string {
   return process.env.SEC_USER_AGENT ?? "investing-together/0.1 (brokentymr@gmail.com)";
@@ -249,6 +251,33 @@ export class SecAdapter {
       };
     } catch (err) {
       return { ok: false, data: null, missing: ["SEC companyfacts unreachable"], provenance: stamp, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Find a filer's CIK by company name via EDGAR full-text search, scoped to a form type (default
+   * S-1/S-1/A). Used to resolve a pre-IPO company NAME → CIK when it has no ticker yet.
+   */
+  async searchByName(name: string, opts: { forms?: string } = {}): Promise<SourceResult<{ cik: string; name: string }>> {
+    const url = FTS_URL(name, opts.forms ?? "S-1,S-1/A");
+    const stamp: ProvenanceStamp = { origin: ORIGIN, url, retrieved_at: new Date().toISOString() };
+    try {
+      const { status, body } = await this.fetchJson(url);
+      if (status !== 200 || !body || typeof body !== "object") {
+        return { ok: false, data: null, missing: [`EDGAR FTS (HTTP ${status})`], provenance: stamp };
+      }
+      const hits = (body as { hits?: { hits?: Array<{ _source?: { ciks?: string[]; display_names?: string[] } }> } }).hits?.hits;
+      const top = hits?.[0]?._source;
+      const rawCik = top?.ciks?.[0];
+      if (!rawCik) return { ok: false, data: null, missing: [`no S-1 filer named "${name}"`], provenance: stamp };
+      return {
+        ok: true,
+        data: { cik: cik10(rawCik), name: (top?.display_names?.[0] ?? name).replace(/\s*\(CIK.*$/i, "").trim() },
+        missing: [],
+        provenance: stamp,
+      };
+    } catch (err) {
+      return { ok: false, data: null, missing: ["EDGAR FTS unreachable"], provenance: stamp, error: (err as Error).message };
     }
   }
 

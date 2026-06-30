@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { getCompanyDetail } from "../../../lib/views/company";
-import { runCoverage, setAnalytics, setContent, approveThesis, addLink, setLinkStatus, deleteLink } from "../../actions";
+import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, addLink, setLinkStatus, deleteLink } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,9 @@ const pctf = (n?: number | null) => (n == null ? "—" : `${(n * 100).toFixed(1)
 const dirTag = (d: string) => (d === "up" ? "good" : d === "down" ? "bad" : "");
 
 interface Band { p10: number; p50: number; p90: number }
+interface Profile { description?: string; founded?: string | null; headquarters?: string | null; total_funding?: string | null; last_valuation?: string | null; key_investors?: string[]; competitors?: string[]; recent?: string | null }
 interface SnapContent {
+  profile?: Profile;
   fundamentals?: { model?: { fiscal_period?: string; line_items?: Record<string, { label: string; value: number; unit: string; yoy?: { change_pct: number } | null }>; ratios?: Record<string, number> } };
   scenario?: { target_period?: string | null; bands?: { revenue?: Band; net_income?: Band; eps?: Band }; beat_probability?: { revenue: number | null; eps: number | null }; sensitivity?: Array<{ driver: string; metric: string; contribution: number }>; watch_items?: string[] };
   market_context?: { consensus?: Record<string, unknown> | null; analyst_view?: Record<string, unknown> | null };
@@ -36,14 +38,16 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
       {/* Header */}
       <div className="spread">
         <div>
-          <h1 style={{ margin: 0 }}>{h.primary_ticker} <span className="faint" style={{ fontWeight: 400, fontSize: "1rem" }}>{h.legal_name}</span></h1>
+          <h1 style={{ margin: 0 }}>{h.primary_ticker ?? h.legal_name} {h.primary_ticker ? <span className="faint" style={{ fontWeight: 400, fontSize: "1rem" }}>{h.legal_name}</span> : null}</h1>
           <div className="row" style={{ marginTop: ".4rem" }}>
+            {h.listing !== "listed" ? <span className={`tag ${h.listing === "pre_ipo" ? "warn" : "accent"}`}>{h.listing.replace("_", "-")}</span> : null}
             <span className="tag">{h.gics_sector ?? "unclassified"}</span>
             <span className={`tag ${h.coverage_status === "monitoring" ? "good" : ""}`}>{h.coverage_status}</span>
             {h.content_enrolled ? <span className="tag accent">content-enrolled</span> : null}
             {h.next_earnings_date ? <span className="tag">next: {h.next_earnings_date}</span> : null}
             {latest ? <span className="tag">snapshot {latest.as_of} · {latest.cycle_label}</span> : <span className="tag warn">no coverage yet</span>}
           </div>
+          {h.research_focus.length ? <div className="faint" style={{ marginTop: ".3rem", fontSize: ".82rem" }}>Research focus: {h.research_focus.join(" · ")}</div> : null}
         </div>
       </div>
 
@@ -51,7 +55,11 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
       <div className="panel" style={{ marginTop: "1rem" }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div className="row">
-            <form action={runCoverage} className="inline"><input type="hidden" name="company_id" value={h.id} /><button type="submit">▶ Run coverage (latest report)</button></form>
+            {h.listing === "listed" ? (
+              <form action={runCoverage} className="inline"><input type="hidden" name="company_id" value={h.id} /><button type="submit">▶ Run coverage (latest report)</button></form>
+            ) : (
+              <form action={runProfile} className="inline"><input type="hidden" name="company_id" value={h.id} /><button type="submit">▶ Build / refresh research profile</button></form>
+            )}
             <form action={setAnalytics} className="inline">
               <input type="hidden" name="company_id" value={h.id} />
               <input type="hidden" name="on" value={h.coverage_status === "monitoring" ? "0" : "1"} />
@@ -94,6 +102,22 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
               </div>
             ) : null}
           </div>
+
+          {/* Profile (private / pre-IPO names) */}
+          {content.profile ? (
+            <div className="panel">
+              <h2>Profile</h2>
+              {content.profile.description ? <p style={{ marginTop: 0 }} className="muted">{content.profile.description}</p> : null}
+              <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: ".4rem .8rem", fontSize: ".88rem" }}>
+                {[["Founded", content.profile.founded], ["HQ", content.profile.headquarters], ["Total funding", content.profile.total_funding], ["Last valuation", content.profile.last_valuation]].map(([k, v]) =>
+                  v ? <div key={k as string}><span className="faint">{k as string}: </span>{v as string}</div> : null)}
+              </div>
+              {content.profile.key_investors?.length ? <p className="muted" style={{ fontSize: ".85rem" }}><span className="faint">Investors: </span>{content.profile.key_investors.join(", ")}</p> : null}
+              {content.profile.competitors?.length ? <p className="muted" style={{ fontSize: ".85rem" }}><span className="faint">Competitors: </span>{content.profile.competitors.join(", ")}</p> : null}
+              {content.profile.recent ? <><h3>Recent</h3><p className="muted" style={{ marginTop: 0, fontSize: ".85rem" }}>{content.profile.recent}</p></> : null}
+              <p className="faint" style={{ fontSize: ".72rem" }}>Sourced via Perplexity — no SEC filings for a {h.listing.replace("_", "-")} company.</p>
+            </div>
+          ) : null}
 
           {/* Fundamentals + diff */}
           {content.fundamentals?.model?.line_items ? (

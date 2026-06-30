@@ -37,6 +37,15 @@ export async function runCoverage(formData: FormData): Promise<void> {
   redirect("/jobs");
 }
 
+/** Build/refresh the Perplexity research profile for a private / pre-IPO name. */
+export async function runProfile(formData: FormData): Promise<void> {
+  const companyId = String(formData.get("company_id") ?? "");
+  if (!companyId) return;
+  await bossQueue.enqueue(JOB.PROFILE_PASS, { company_id: companyId });
+  revalidatePath(`/company/${companyId}`);
+  redirect("/jobs");
+}
+
 /** Enroll/unenroll the asset in the automated analytics pipeline (daily monitor + filing poll). */
 export async function setAnalytics(formData: FormData): Promise<void> {
   const companyId = String(formData.get("company_id") ?? "");

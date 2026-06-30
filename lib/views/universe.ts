@@ -10,6 +10,7 @@ export interface UniverseRow {
   primary_ticker: string | null;
   gics_sector: string | null;
   coverage_status: string;
+  listing: string;
   content_enrolled: boolean;
   next_earnings_date: string | null;
   latest_as_of: string | null;
@@ -28,7 +29,7 @@ export async function listUniverse(f: UniverseFilters = {}): Promise<UniverseRow
   if (f.sector) { params.push(f.sector); where.push(`c.gics_sector = $${params.length}`); }
   if (f.status) { params.push(f.status); where.push(`c.coverage_status = $${params.length}`); }
   const { rows } = await query<UniverseRow>(
-    `SELECT c.id, c.legal_name, c.primary_ticker, c.gics_sector, c.coverage_status, c.content_enrolled,
+    `SELECT c.id, c.legal_name, c.primary_ticker, c.gics_sector, c.coverage_status, c.listing, c.content_enrolled,
             to_char(c.next_earnings_date,'YYYY-MM-DD') AS next_earnings_date,
             to_char(s.as_of,'YYYY-MM-DD') AS latest_as_of, s.conviction,
             s.content->'thesis'->>'one_liner' AS one_liner,

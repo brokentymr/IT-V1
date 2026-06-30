@@ -4,6 +4,7 @@ import { loadEnv } from "../lib/env";
 import { getBoss, stopBoss } from "../lib/queue/boss";
 import { JOB } from "../lib/queue/types";
 import { handleCoveragePass, type CoverageJobData } from "../lib/jobs/coverage";
+import { handleProfilePass, type ProfileJobData } from "../lib/jobs/profile";
 
 loadEnv();
 const boss = await getBoss();
@@ -17,6 +18,19 @@ await boss.work(JOB.COVERAGE_PASS, async (jobs) => {
     } catch (err) {
       console.error(`[worker] ${JOB.COVERAGE_PASS} failed`, (err as Error).message);
       throw err; // let pg-boss retry
+    }
+  }
+});
+
+await boss.work(JOB.PROFILE_PASS, async (jobs) => {
+  for (const job of jobs) {
+    // Perplexity research profile for a private / pre-IPO name (intake).
+    try {
+      const r = await handleProfilePass(job.data as ProfileJobData);
+      console.log(`[worker] ${JOB.PROFILE_PASS} ${r.ok ? "ok" : "degraded"}`, JSON.stringify(r));
+    } catch (err) {
+      console.error(`[worker] ${JOB.PROFILE_PASS} failed`, (err as Error).message);
+      throw err;
     }
   }
 });

@@ -33,7 +33,7 @@ interface CompanyRow {
   primary_ticker: string;
   cik: string | null;
   gics_sector: string | null;
-  coverage: { positions_held?: unknown[]; next_earnings_date?: string | null; next_earnings_date_override?: string | null };
+  coverage: { positions_held?: unknown[]; next_earnings_date?: string | null; next_earnings_date_override?: string | null; research_focus?: string[] };
   next_earnings_date: string | null;
 }
 
@@ -232,6 +232,7 @@ export async function runCoveragePass(opts: {
     rolling_outlook: cf.rolling_outlook,
     forward_expectations: cf.forward?.expectations ?? null,
     market_context: mc ? { consensus: mc.consensus, analyst_view: mc.analyst_view } : undefined,
+    research_focus: company.coverage?.research_focus,
   });
 
   // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment).
@@ -248,7 +249,7 @@ export async function runCoveragePass(opts: {
     if (mda) {
       const dr = await opts.analyst.extractDrivers({
         company: { legal_name: company.legal_name, ticker: company.primary_ticker },
-        filing: { form: opts.formType ?? "Filing" }, mda_text: mda,
+        filing: { form: opts.formType ?? "Filing" }, mda_text: mda, research_focus: company.coverage?.research_focus,
       }).catch((e) => { console.warn(`[coverage] driver extraction failed: ${(e as Error).message}`); return { drivers: [] as Driver[] }; });
       drivers = dr.drivers;
     }

@@ -1,5 +1,5 @@
 import { listUniverse, universeFacets } from "../../lib/views/universe";
-import { addCompany } from "../actions";
+import AddAsset from "./AddAsset";
 
 export const dynamic = "force-dynamic";
 
@@ -39,8 +39,9 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
               {rows.map((r) => (
                 <tr key={r.id}>
                   <td>
-                    <a href={`/company/${r.id}`}><strong>{r.primary_ticker ?? "—"}</strong></a>
-                    <div className="faint" style={{ fontSize: ".8rem" }}>{r.legal_name}</div>
+                    <a href={`/company/${r.id}`}><strong>{r.primary_ticker ?? r.legal_name}</strong></a>
+                    {r.listing !== "listed" ? <span className={`tag ${r.listing === "pre_ipo" ? "warn" : "accent"}`} style={{ marginLeft: 6 }}>{r.listing.replace("_", "-")}</span> : null}
+                    {r.primary_ticker ? <div className="faint" style={{ fontSize: ".8rem" }}>{r.legal_name}</div> : null}
                   </td>
                   <td className="muted">{r.gics_sector ?? "—"}</td>
                   <td>
@@ -57,12 +58,7 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
         </div>
 
         <div className="panel" style={{ alignSelf: "start" }}>
-          <h2>Add asset</h2>
-          <p className="muted" style={{ marginTop: 0, fontSize: ".88rem" }}>Ticker → SEC EDGAR identity → appears in the Universe.</p>
-          <form action={addCompany} className="row">
-            <input name="ticker" placeholder="e.g. MSFT" required style={{ flex: 1 }} />
-            <button type="submit">Add</button>
-          </form>
+          <AddAsset />
         </div>
       </div>
     </div>

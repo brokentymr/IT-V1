@@ -4,12 +4,14 @@
  * with provenance to a Tier-1 source and a confidence + missing-sources list (§8).
  *
  * Built on free SEC EDGAR; GICS via the SIC crosswalk (Phase 1 decision). Deterministic
- * (no LLM), so it costs nothing against the $50 ceiling.
+ * (no LLM), so it costs nothing against the $50 ceiling. `ingestByCik` adds a CIK-direct path
+ * for pre-IPO S-1 filers that have a CIK but no ticker yet.
  */
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { withTransaction } from "../db/pool";
 import { SecAdapter, type SecIdentity } from "../sources/sec";
+import type { ProvenanceStamp } from "../sources/types";
 import { classifyFromSic } from "../gics/taxonomy";
 import { Company, Market } from "../types";
 
@@ -53,61 +55,57 @@ async function ensureMarketRow(client: PoolClient, m: Market): Promise<void> {
   );
 }
 
-export async function ingestCompany(
-  ticker: string,
-  opts: { sec?: SecAdapter } = {},
-): Promise<IngestionResult> {
-  // Writes go through the shared pool (withTransaction); tests redirect it via setPool().
+/** Resolve a ticker via SEC EDGAR and persist the company (listed path). */
+export async function ingestCompany(ticker: string, opts: { sec?: SecAdapter } = {}): Promise<IngestionResult> {
   const sec = opts.sec ?? new SecAdapter();
   const want = ticker.trim().toUpperCase();
-  const missing: string[] = [];
-
-  // 1. Identity from SEC EDGAR.
   const resolved = await sec.resolveTicker(want);
-  if (!resolved.ok || !resolved.data) {
-    throw new Error(`Ingestion failed for ${want}: ${resolved.missing.join("; ") || "ticker not resolvable"}`);
-  }
+  if (!resolved.ok || !resolved.data) throw new Error(`Ingestion failed for ${want}: ${resolved.missing.join("; ") || "ticker not resolvable"}`);
   const identity = await sec.companyIdentity(resolved.data.cik);
-  if (!identity.ok || !identity.data) {
-    throw new Error(`Ingestion failed for ${want}: ${identity.missing.join("; ") || "no submissions record"}`);
-  }
-  const sec_id: SecIdentity = identity.data;
-  missing.push(...identity.missing);
+  if (!identity.ok || !identity.data) throw new Error(`Ingestion failed for ${want}: ${identity.missing.join("; ") || "no submissions record"}`);
+  return persistIdentity(identity.data, identity.provenance, identity.missing, { primaryTicker: want, listing: "listed" });
+}
 
-  // 2. Classification (GICS via SIC crosswalk).
+/** Ingest a company directly by CIK — for pre-IPO S-1 filers that have a CIK but no ticker yet. */
+export async function ingestByCik(cik: string, opts: { sec?: SecAdapter; listing?: "listed" | "pre_ipo" } = {}): Promise<IngestionResult> {
+  const sec = opts.sec ?? new SecAdapter();
+  const identity = await sec.companyIdentity(cik);
+  if (!identity.ok || !identity.data) throw new Error(`Ingestion by CIK ${cik} failed: ${identity.missing.join("; ") || "no submissions record"}`);
+  const primaryTicker = identity.data.tickers[0] ?? null;
+  return persistIdentity(identity.data, identity.provenance, identity.missing, {
+    primaryTicker, listing: opts.listing ?? (primaryTicker ? "listed" : "pre_ipo"),
+  });
+}
+
+async function persistIdentity(
+  sec_id: SecIdentity,
+  provenance: ProvenanceStamp | null,
+  identityMissing: string[],
+  opts: { primaryTicker: string | null; listing: "listed" | "pre_ipo" | "private" },
+): Promise<IngestionResult> {
+  const missing = [...identityMissing];
   const gics = classifyFromSic(sec_id.sic);
   if (gics.gics_sector === null) missing.push(`GICS sector unresolved from ${gics.basis}`);
 
-  // 3. Build the §3.3 company object (validated against the contract before persisting).
-  const tickers = sec_id.tickers.length ? sec_id.tickers : [want];
+  const tickers = sec_id.tickers.length ? sec_id.tickers : (opts.primaryTicker ? [opts.primaryTicker] : []);
   const primaryExchange = sec_id.exchanges[0];
   const markets = [...new Set(sec_id.exchanges)].map(marketForExchange);
   const company = Company.parse({
     id: randomUUID(),
     identifiers: { legal_name: sec_id.legal_name, tickers, cik: sec_id.cik },
-    classification: {
-      gics_sector: gics.gics_sector,
-      industry_group: gics.industry_group,
-      industry: gics.industry,
-      sub_industry: gics.sub_industry,
-    },
+    classification: { gics_sector: gics.gics_sector, industry_group: gics.industry_group, industry: gics.industry, sub_industry: gics.sub_industry },
     markets: markets.length ? markets : [marketForExchange("Unknown")],
-    tradingview_symbol: tradingViewSymbol(primaryExchange, want),
+    tradingview_symbol: opts.primaryTicker ? tradingViewSymbol(primaryExchange, opts.primaryTicker) : null,
     coverage: { status: "watchlist", authors: [], next_earnings_date: null, positions_held: [] },
     content_refs: [],
   });
-
   const flagged = gics.confidence < CONFIDENCE_FLAG_THRESHOLD;
 
-  // 4. Persist atomically.
   const result = await withTransaction(async (client) => {
     for (const m of company.markets) await ensureMarketRow(client, m);
 
-    // idempotent on primary ticker
-    const existing = await client.query<{ id: string }>(
-      "SELECT id FROM companies WHERE lower(primary_ticker) = lower($1)",
-      [want],
-    );
+    // Idempotent on CIK (present for every SEC-sourced company; a pre-IPO filer may have no ticker).
+    const existing = await client.query<{ id: string }>("SELECT id FROM companies WHERE cik = $1", [sec_id.cik]);
     let companyId: string;
     let status: "created" | "updated";
 
@@ -115,27 +113,26 @@ export async function ingestCompany(
       companyId = existing.rows[0].id;
       status = "updated";
       await client.query(
-        `UPDATE companies SET legal_name=$2, cik=$3, identifiers=$4, classification=$5, markets=$6,
-           tradingview_symbol=$7, coverage=$8, gics_sector=$9, sub_industry=$10, classification_confidence=$11
+        `UPDATE companies SET legal_name=$2, primary_ticker=$3, cik=$4, identifiers=$5, classification=$6, markets=$7,
+           tradingview_symbol=$8, coverage=$9, gics_sector=$10, sub_industry=$11, listing=$12, classification_confidence=$13
          WHERE id=$1`,
-        [companyId, company.identifiers.legal_name, company.identifiers.cik, company.identifiers,
+        [companyId, company.identifiers.legal_name, opts.primaryTicker, company.identifiers.cik, company.identifiers,
           company.classification, JSON.stringify(company.markets), company.tradingview_symbol, company.coverage,
-          company.classification.gics_sector, company.classification.sub_industry, gics.confidence],
+          company.classification.gics_sector, company.classification.sub_industry, opts.listing, gics.confidence],
       );
     } else {
       companyId = company.id;
       status = "created";
       await client.query(
         `INSERT INTO companies (id, legal_name, primary_ticker, cik, identifiers, classification, markets,
-           tradingview_symbol, coverage, coverage_status, gics_sector, sub_industry, classification_confidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [companyId, company.identifiers.legal_name, want, company.identifiers.cik, company.identifiers,
+           tradingview_symbol, coverage, coverage_status, gics_sector, sub_industry, listing, classification_confidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [companyId, company.identifiers.legal_name, opts.primaryTicker, company.identifiers.cik, company.identifiers,
           company.classification, JSON.stringify(company.markets), company.tradingview_symbol, company.coverage,
-          company.coverage.status, company.classification.gics_sector, company.classification.sub_industry, gics.confidence],
+          company.coverage.status, company.classification.gics_sector, company.classification.sub_industry, opts.listing, gics.confidence],
       );
     }
 
-    // canonical skeleton (one per company)
     const cf = await client.query<{ id: string }>(
       `INSERT INTO canonical_files (company_id) VALUES ($1)
        ON CONFLICT (company_id) DO UPDATE SET company_id = EXCLUDED.company_id RETURNING id`,
@@ -143,15 +140,14 @@ export async function ingestCompany(
     );
     await client.query("UPDATE companies SET canonical_file_ref=$2 WHERE id=$1", [companyId, cf.rows[0].id]);
 
-    // provenance: the SEC submissions fetch
     const src = await client.query<{ id: string }>(
       `INSERT INTO sources (company_id, tier, kind, origin, url, title, retrieved_at, metadata)
        VALUES ($1, 1, 'api', $2, $3, $4, now(), $5) RETURNING id`,
-      [companyId, identity.provenance?.origin ?? "SEC EDGAR", identity.provenance?.url ?? null,
+      [companyId, provenance?.origin ?? "SEC EDGAR", provenance?.url ?? null,
         company.identifiers.legal_name, { sic: sec_id.sic, sic_description: sec_id.sic_description, basis: gics.basis }],
     );
 
-    // 5. Seed peer links: existing companies in the same GICS industry_group → thematic_peer (both directions).
+    // Seed peer links: existing companies in the same GICS industry_group → thematic_peer (both directions).
     let links_created = 0;
     const group = company.classification.industry_group;
     if (group) {
@@ -177,7 +173,7 @@ export async function ingestCompany(
 
   return {
     company_id: result.companyId,
-    ticker: want,
+    ticker: opts.primaryTicker ?? "",
     legal_name: company.identifiers.legal_name,
     cik: sec_id.cik,
     classification: company.classification,

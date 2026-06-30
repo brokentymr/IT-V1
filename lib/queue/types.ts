@@ -2,6 +2,7 @@
 export const JOB = {
   COVERAGE_PASS: "coverage-pass", // Fundamental Research coverage pass on filing arrival (Engine 2, Phase 4)
   SENTIMENT_RUN: "sentiment-run", // Brand/Sentiment escalation from a major news event (Engine 4, Phase 7)
+  PROFILE_PASS: "profile-pass",   // Perplexity research profile for a private / pre-IPO name (intake)
 } as const;
 
 export type JobName = (typeof JOB)[keyof typeof JOB];

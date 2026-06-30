@@ -13,10 +13,12 @@ export interface CompanyHeader {
   gics_sector: string | null;
   sub_industry: string | null;
   coverage_status: string;
+  listing: string;
   content_enrolled: boolean;
   next_earnings_date: string | null;
   tradingview_symbol: string | null;
   positions_held: unknown[];
+  research_focus: string[];
   rolling_outlook: string;
   forward_note: Record<string, unknown> | null;
 }
@@ -73,9 +75,10 @@ export interface CompanyDetail {
 export async function getCompanyDetail(id: string): Promise<CompanyDetail | null> {
   const c = await query<CompanyHeader & { current_events: { rolling_outlook?: string; forward_note?: Record<string, unknown> } }>(
     `SELECT c.id, c.legal_name, c.primary_ticker, c.cik, c.gics_sector, c.sub_industry,
-            c.coverage_status, c.content_enrolled, c.tradingview_symbol,
+            c.coverage_status, c.listing, c.content_enrolled, c.tradingview_symbol,
             to_char(c.next_earnings_date,'YYYY-MM-DD') AS next_earnings_date,
             COALESCE(c.coverage->'positions_held','[]') AS positions_held,
+            COALESCE(c.coverage->'research_focus','[]') AS research_focus,
             COALESCE(cf.current_events,'{}') AS current_events
        FROM companies c
        LEFT JOIN canonical_files cf ON cf.company_id = c.id
@@ -87,8 +90,9 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
   const header: CompanyHeader = {
     id: row.id, legal_name: row.legal_name, primary_ticker: row.primary_ticker, cik: row.cik,
     gics_sector: row.gics_sector, sub_industry: row.sub_industry, coverage_status: row.coverage_status,
-    content_enrolled: row.content_enrolled, next_earnings_date: row.next_earnings_date,
+    listing: row.listing, content_enrolled: row.content_enrolled, next_earnings_date: row.next_earnings_date,
     tradingview_symbol: row.tradingview_symbol, positions_held: (row.positions_held as unknown[]) ?? [],
+    research_focus: (row.research_focus as string[]) ?? [],
     rolling_outlook: row.current_events?.rolling_outlook ?? "",
     forward_note: row.current_events?.forward_note ?? null,
   };

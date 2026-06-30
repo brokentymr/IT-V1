@@ -20,6 +20,15 @@ const ctxLine = (label: string, ctx?: MarketContextInput): string =>
     ? `\n${label} (external, advisory — do NOT treat as ground-truth numbers):\n  consensus: ${JSON.stringify(ctx.consensus ?? null)}\n  analyst view: ${JSON.stringify(ctx.analyst_view ?? null)}`
     : "";
 
+/**
+ * Operator-specified research factors to give EXTRA WEIGHT (intake directives). These are an added
+ * emphasis layered on top of the full analysis — they must NOT narrow it or cost breadth.
+ */
+const focusLine = (focus?: string[]): string =>
+  focus?.length
+    ? `\n\nAdded emphasis (do NOT narrow the analysis — keep full breadth): in addition to complete standard coverage, give extra weight to and explicitly address ${focus.map((f) => `"${f}"`).join(", ")}, with both the quantitative and qualitative read, flagging anything here that could materially change the outlook (e.g. demand destruction, share shift). Treat these as priority topics layered on top, not a replacement for comprehensive analysis.`
+    : "";
+
 // ---------- forward pass ----------
 export interface ForwardFrameInput {
   company: { legal_name: string; ticker: string; gics_sector: string | null };
@@ -46,6 +55,7 @@ export interface ThesisDraftInput {
   rolling_outlook: string;
   forward_expectations: string | null; // from the forward note, if one was staged
   market_context?: MarketContextInput;
+  research_focus?: string[];
 }
 
 export const ThesisDraft = z.object({
@@ -81,6 +91,7 @@ export interface DriverExtractInput {
   company: { legal_name: string; ticker: string };
   filing: { form: string };
   mda_text: string; // bounded MD&A slice
+  research_focus?: string[];
 }
 export const DriversResult = z.object({ drivers: z.array(Driver).default([]) });
 export type DriversResult = z.infer<typeof DriversResult>;
@@ -147,7 +158,7 @@ ${modelDigest(input.model, input.diff)}${ctxLine("Market context", input.market_
 
 Write the thesis. Measure actual vs the forward expectations. Be concrete but CONCISE — keep
 long_form to 3-5 sentences and each list to at most 4 short items. The invalidation triggers MUST be
-specific and measurable (name a metric and a level/direction), not vague. Return JSON:
+specific and measurable (name a metric and a level/direction), not vague.${focusLine(input.research_focus)} Return JSON:
 {"one_liner": string, "long_form": string, "actual_vs_expected": string, "tensions": [string],
  "invalidation_triggers": [string], "conviction": int 1-5}`;
     return completeJSON({ prompt, schema: ThesisDraft, model: "claude-sonnet-4-6", purpose: "fundamentals.thesis", maxTokens: 1600 });
@@ -176,7 +187,7 @@ For each driver, map it to ONE metric it most affects: revenue | gross_margin | 
   - for a margin metric: percentage points added to/subtracted from that margin LEVEL.
 Bear = the unfavorable case, bull = the favorable case, base = most likely. A headwind has negative
 base; a tailwind positive. Keep magnitudes realistic (most single drivers move a metric by 0-5 pts).
-Only extract drivers grounded in the text — do NOT invent. Return JSON:
+Only extract drivers grounded in the text — do NOT invent.${focusLine(input.research_focus)} Return JSON:
 {"drivers": [{"name": string, "metric": <enum>, "direction": "tailwind|headwind|mixed",
   "framing": string, "quote": string|null,
   "impact_pct": {"bear": number, "base": number, "bull": number}}]}
