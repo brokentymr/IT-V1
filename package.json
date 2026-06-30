@@ -17,6 +17,7 @@
     "poll-filings": "tsx scripts/poll-filings.ts",
     "schedule-forward": "tsx scripts/schedule-forward.ts",
     "price-monitor": "tsx scripts/price-monitor.ts",
+    "sentiment": "tsx scripts/sentiment.ts",
     "eval:fundamentals": "tsx scripts/eval-fundamentals.ts",
     "test": "vitest run",
     "test:watch": "vitest"

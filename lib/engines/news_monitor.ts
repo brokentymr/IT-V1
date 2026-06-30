@@ -123,6 +123,14 @@ export async function runDailyMonitor(opts: {
           headline: article.title, summary: a.impact.forward_outlook, category: a.category, sourceRef: sourceId,
         });
         result.read_through_notes += rt.notesCreated;
+
+        // Spec §4.6: a MAJOR-band read-through escalates a sentiment run on the affected neighbor too.
+        for (const reachedId of rt.escalated) {
+          await queue.enqueue(JOB.SENTIMENT_RUN, {
+            company_id: reachedId, window_days: MONITOR_CONFIG.escalationWindowDays, trigger_headline: `read-through: ${article.title}`,
+          }).catch((e) => console.warn("[monitor] read-through sentiment enqueue failed:", (e as Error).message));
+          result.escalations++;
+        }
       }
 
       if (band === "major") {

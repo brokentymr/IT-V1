@@ -23,6 +23,7 @@ export interface ReadThroughOrigin {
 export interface ReadThroughOutcome {
   notesCreated: number;
   reached: string[]; // affected company ids
+  escalated: string[]; // ids that received a MAJOR-band read-through (→ sentiment escalation, spec §4.6)
 }
 
 const materialityScore = (m: "low" | "medium" | "high"): number =>
@@ -33,7 +34,7 @@ export async function propagateReadThrough(
   origin: ReadThroughOrigin,
   cfg: MonitorConfig = MONITOR_CONFIG,
 ): Promise<ReadThroughOutcome> {
-  const out: ReadThroughOutcome = { notesCreated: 0, reached: [] };
+  const out: ReadThroughOutcome = { notesCreated: 0, reached: [], escalated: [] };
   const visited = new Set<string>([origin.companyId]);
 
   interface Node { companyId: string; companyName: string; headline: string; summary: string; category: string; depth: number }
@@ -75,6 +76,7 @@ export async function propagateReadThrough(
 
         const noteId = randomUUID();
         const status = score >= cfg.bands.escalate ? "escalated" : "flagged";
+        if (status === "escalated") out.escalated.push(link.to_company_id);
         const content = NewsNote.parse({
           id: noteId,
           company_id: link.to_company_id,

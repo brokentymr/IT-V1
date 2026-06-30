@@ -42,8 +42,11 @@ describe("Engine 3 — News & Events Monitor (integration)", () => {
     const r = await runDailyMonitor({ analyzer, news, queue, maxArticles: 10 });
 
     expect(r.notes_created).toBe(2);
-    expect(r.escalations).toBe(1);
-    expect(queue.jobs.filter((j) => j.name === "sentiment-run")).toHaveLength(1);
+    // origin AAPL (major) + the major-band read-through to HPQ both escalate a sentiment run (spec §4.6)
+    expect(r.escalations).toBe(2);
+    const sentimentTargets = queue.jobs.filter((j) => j.name === "sentiment-run").map((j) => (j.data as { company_id: string }).company_id);
+    expect(sentimentTargets).toContain(aaplId);
+    expect(sentimentTargets).toContain(hpqId);
     expect(r.read_through_notes).toBe(1);
 
     const primary = await db.pool.query(

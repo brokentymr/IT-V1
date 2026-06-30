@@ -5,6 +5,7 @@ import { getBoss, stopBoss } from "../lib/queue/boss";
 import { JOB } from "../lib/queue/types";
 import { handleCoveragePass, type CoverageJobData } from "../lib/jobs/coverage";
 import { handleProfilePass, type ProfileJobData } from "../lib/jobs/profile";
+import { handleSentimentRun, type SentimentJobData } from "../lib/jobs/sentiment";
 
 loadEnv();
 const boss = await getBoss();
@@ -37,8 +38,14 @@ await boss.work(JOB.PROFILE_PASS, async (jobs) => {
 
 await boss.work(JOB.SENTIMENT_RUN, async (jobs) => {
   for (const job of jobs) {
-    // Phase 3: placeholder. Engine 4 (Brand/Sentiment) runs the escalated window in Phase 7.
-    console.log(`[worker] ${JOB.SENTIMENT_RUN}`, JSON.stringify(job.data));
+    // Engine 4 (Brand/Sentiment) escalated window on a major event (Phase 7).
+    try {
+      const r = await handleSentimentRun(job.data as SentimentJobData);
+      console.log(`[worker] ${JOB.SENTIMENT_RUN} ok`, JSON.stringify({ company_id: r.company_id, gap: r.gap.direction, confidence: r.confidence, degraded: r.degraded.length }));
+    } catch (err) {
+      console.error(`[worker] ${JOB.SENTIMENT_RUN} failed`, (err as Error).message);
+      throw err;
+    }
   }
 });
 

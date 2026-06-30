@@ -31,7 +31,7 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const d = await getCompanyDetail(id);
   if (!d) notFound();
-  const { header: h, latest, approval, relationships, feed, signals, areas } = d;
+  const { header: h, latest, approval, relationships, feed, signals, areas, sentiment } = d;
   const content = (latest?.content ?? {}) as SnapContent;
   const diff = (latest?.diff ?? {}) as Diff;
   const sc = content.scenario;
@@ -279,8 +279,40 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        {/* Sidebar: market context, signals, feed, history */}
+        {/* Sidebar: sentiment, market context, signals, feed, history */}
         <div>
+          {sentiment ? (
+            <div className="panel">
+              <div className="spread">
+                <h2>Sentiment</h2>
+                <span className={`tag ${sentiment.confidence != null && sentiment.confidence < 0.5 ? "warn" : ""}`}>conf {sentiment.confidence != null ? `${(sentiment.confidence * 100).toFixed(0)}%` : "—"}</span>
+              </div>
+              {/* The gap — the headline read */}
+              <div className="row" style={{ gap: ".4rem", marginBottom: ".4rem" }}>
+                <span className={`tag ${sentiment.sentiment_vs_fundamentals_gap.direction === "sentiment_ahead" ? "warn" : sentiment.sentiment_vs_fundamentals_gap.direction === "sentiment_behind" ? "accent" : "good"}`}>
+                  {sentiment.sentiment_vs_fundamentals_gap.direction === "sentiment_ahead" ? "crowd ahead of fundamentals" : sentiment.sentiment_vs_fundamentals_gap.direction === "sentiment_behind" ? "crowd behind fundamentals" : "aligned"}
+                </span>
+                <span className="tag">{sentiment.sentiment_vs_fundamentals_gap.magnitude} gap</span>
+              </div>
+              {sentiment.gap_rationale ? <p className="muted" style={{ marginTop: 0, fontSize: ".85rem" }}>{sentiment.gap_rationale}</p> : null}
+              {sentiment.ground_momentum ? <p className="muted" style={{ fontSize: ".85rem" }}>{sentiment.ground_momentum}</p> : null}
+              <table>
+                <thead><tr><th>Platform</th><th>Vol</th><th>Net</th><th>Trend</th></tr></thead>
+                <tbody>
+                  {sentiment.by_platform.map((p) => (
+                    <tr key={p.platform}>
+                      <td>{p.platform}{p.top_themes?.length ? <div className="faint" style={{ fontSize: ".72rem" }}>{p.top_themes.join(" · ")}</div> : null}</td>
+                      <td className="mono">{p.volume}</td>
+                      <td><span className={`tag ${p.sentiment > 0.15 ? "good" : p.sentiment < -0.15 ? "bad" : ""}`}>{p.sentiment > 0 ? "+" : ""}{p.sentiment.toFixed(2)}</span></td>
+                      <td className="muted">{p.trend}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {sentiment.degraded?.length ? <p className="faint" style={{ fontSize: ".72rem" }}>Degraded: {sentiment.degraded.length} source(s) — confidence lowered.</p> : null}
+            </div>
+          ) : null}
+
           {content.market_context ? (
             <div className="panel">
               <h2>Market context</h2>

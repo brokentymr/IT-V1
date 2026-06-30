@@ -81,9 +81,22 @@ export interface AreaRow {
   headlines: Array<{ headline: string; url: string | null; detected_at: string | null }>;
 }
 
+export interface BrandSentiment {
+  as_of?: string;
+  trigger?: string;
+  window_days?: number;
+  by_platform: Array<{ platform: string; volume: number; sentiment: number; trend: string; top_themes: string[] }>;
+  ground_momentum: string;
+  sentiment_vs_fundamentals_gap: { direction: string; magnitude: string };
+  gap_rationale?: string;
+  confidence?: number;
+  degraded?: string[];
+}
+
 export interface CompanyDetail {
   header: CompanyHeader;
   latest: SnapshotRow | null;
+  sentiment: BrandSentiment | null;
   snapshots: Array<{ snapshot_id: string; as_of: string; cycle_label: string; conviction: number | null }>;
   approval: { approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null } | null;
   relationships: RelationshipRow[];
@@ -93,7 +106,7 @@ export interface CompanyDetail {
 }
 
 export async function getCompanyDetail(id: string): Promise<CompanyDetail | null> {
-  const c = await query<CompanyHeader & { current_events: { rolling_outlook?: string; forward_note?: Record<string, unknown> } }>(
+  const c = await query<CompanyHeader & { current_events: { rolling_outlook?: string; forward_note?: Record<string, unknown>; brand_sentiment?: BrandSentiment } }>(
     `SELECT c.id, c.legal_name, c.primary_ticker, c.cik, c.gics_sector, c.sub_industry,
             c.coverage_status, c.listing, c.content_enrolled, c.tradingview_symbol,
             to_char(c.next_earnings_date,'YYYY-MM-DD') AS next_earnings_date,
@@ -171,6 +184,7 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
 
   return {
     header, latest,
+    sentiment: row.current_events?.brand_sentiment ?? null,
     snapshots: snaps.rows.map((s) => ({ snapshot_id: s.snapshot_id, as_of: s.as_of, cycle_label: s.cycle_label, conviction: s.conviction })),
     approval, relationships: rels.rows, feed: feed.rows, signals: signals.rows,
     areas: {

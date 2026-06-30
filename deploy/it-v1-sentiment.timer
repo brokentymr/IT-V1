@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Investing Together weekly Brand/Sentiment sweep
+
+[Timer]
+OnCalendar=Sun *-*-* 12:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

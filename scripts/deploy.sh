@@ -20,6 +20,8 @@ install -m 644 deploy/it-v1-forward.service /etc/systemd/system/it-v1-forward.se
 install -m 644 deploy/it-v1-forward.timer /etc/systemd/system/it-v1-forward.timer
 install -m 644 deploy/it-v1-prices.service /etc/systemd/system/it-v1-prices.service
 install -m 644 deploy/it-v1-prices.timer /etc/systemd/system/it-v1-prices.timer
+install -m 644 deploy/it-v1-sentiment.service /etc/systemd/system/it-v1-sentiment.service
+install -m 644 deploy/it-v1-sentiment.timer /etc/systemd/system/it-v1-sentiment.timer
 install -m 644 deploy/Caddyfile /etc/caddy/Caddyfile
 systemctl daemon-reload
 systemctl restart it-v1 it-v1-worker
@@ -27,6 +29,7 @@ systemctl enable --now it-v1-monitor.timer
 systemctl enable --now it-v1-filings.timer
 systemctl enable --now it-v1-forward.timer
 systemctl enable --now it-v1-prices.timer
+systemctl enable --now it-v1-sentiment.timer
 systemctl reload caddy
 
 for _ in $(seq 1 20); do
