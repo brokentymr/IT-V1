@@ -1,0 +1,18 @@
+[Unit]
+Description=Investing Together (Next.js app)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/IT-V1
+# Next.js also auto-loads /opt/IT-V1/.env from the working dir; EnvironmentFile is belt-and-suspenders.
+EnvironmentFile=/opt/IT-V1/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
