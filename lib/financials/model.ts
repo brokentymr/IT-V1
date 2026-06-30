@@ -153,6 +153,81 @@ export interface SnapshotDiff {
   ratios: Record<string, { prior: number | null; current: number; change: number | null }>;
 }
 
+// ---------------------------------------------------------------------------
+// Historical series + volatility (inputs to the Monte Carlo, Phase-4 improvement #4).
+// ---------------------------------------------------------------------------
+export interface Stats { mean: number; stdev: number; n: number }
+
+/**
+ * True for a ~3-month (fiscal-quarter) flow value. XBRL tags 3/6/9-month and annual figures under
+ * the same concept+unit; mixing durations produces nonsense "growth" (e.g. 9-month ÷ 3-month), so
+ * the volatility/base series below keep ONLY quarterly periods. (Stock items have no start → excluded.)
+ */
+function isQuarter(v: XbrlUnitValue): boolean {
+  if (!v.start) return false;
+  const days = (Date.parse(`${v.end}T00:00:00Z`) - Date.parse(`${v.start}T00:00:00Z`)) / 86_400_000;
+  return days >= 80 && days <= 100;
+}
+
+export function stats(xs: number[]): Stats {
+  const n = xs.length;
+  if (!n) return { mean: 0, stdev: 0, n: 0 };
+  const mean = xs.reduce((a, b) => a + b, 0) / n;
+  const variance = n > 1 ? xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
+  return { mean, stdev: Math.sqrt(variance), n };
+}
+
+/** Year-over-year growth observations for a metric (same fiscal period, one year apart). */
+export function metricYoYGrowths(facts: CompanyFacts, metricKey: string, config: FundamentalsConfig = FUNDAMENTALS_CONFIG): number[] {
+  const spec = config.metrics.find((m) => m.key === metricKey);
+  if (!spec) return [];
+  const values = valuesFor(facts, spec).filter(isQuarter); // quarterly-only, consistent duration
+  const out: number[] = [];
+  for (const v of values) {
+    const prior = priorYear(values, v);
+    if (prior && prior.val !== 0) out.push((v.val - prior.val) / Math.abs(prior.val));
+  }
+  return out;
+}
+
+/** Net-margin level observations (net income / revenue) aligned by period. */
+export function netMarginLevels(facts: CompanyFacts, config: FundamentalsConfig = FUNDAMENTALS_CONFIG): number[] {
+  const rspec = config.metrics.find((m) => m.key === "revenue");
+  const nspec = config.metrics.find((m) => m.key === "net_income");
+  if (!rspec || !nspec) return [];
+  const rev = new Map(valuesFor(facts, rspec).filter(isQuarter).map((v) => [`${v.end}:${v.fp ?? ""}`, v.val]));
+  const out: number[] = [];
+  for (const ni of valuesFor(facts, nspec).filter(isQuarter)) {
+    const r = rev.get(`${ni.end}:${ni.fp ?? ""}`);
+    if (r && r !== 0) out.push(ni.val / r);
+  }
+  return out;
+}
+
+/**
+ * The prior-year comparable value to grow into the NEXT period: the metric reading whose period end
+ * is ~9 months before the latest (so it laps the upcoming quarter a year on). Falls back to the
+ * latest value (a sequential proxy) when no good comparable exists.
+ */
+export function priorYearBaseForNext(
+  facts: CompanyFacts, metricKey: string, latestEnd: string, config: FundamentalsConfig = FUNDAMENTALS_CONFIG,
+): { value: number; period_end: string; proxy: boolean } | null {
+  const spec = config.metrics.find((m) => m.key === metricKey);
+  if (!spec) return null;
+  const values = valuesFor(facts, spec).filter(isQuarter); // consistent ~3-month periods only
+  if (!values.length) return null;
+  const targetMs = Date.parse(`${latestEnd}T00:00:00Z`) - 273 * 86_400_000;
+  let best = values[0];
+  let bestGap = Infinity;
+  for (const v of values) {
+    const gap = Math.abs(Date.parse(`${v.end}T00:00:00Z`) - targetMs);
+    if (gap < bestGap) { bestGap = gap; best = v; }
+  }
+  const proxy = bestGap > 60 * 86_400_000; // no comparable within ~2 months → proxy
+  const latest = [...values].sort((a, b) => (a.end < b.end ? 1 : -1))[0];
+  return proxy ? { value: latest.val, period_end: latest.end, proxy: true } : { value: best.val, period_end: best.end, proxy: false };
+}
+
 /** Diff the current model against the prior snapshot's model — the first-class "what changed". */
 export function diffModels(prev: FinancialModel | null, curr: FinancialModel): SnapshotDiff {
   const metrics: MetricDiff[] = [];

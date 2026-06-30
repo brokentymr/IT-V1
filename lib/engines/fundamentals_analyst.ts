@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { completeJSON } from "../llm/client";
-import { LinkType } from "../types";
+import { LinkType, Driver } from "../types";
 import type { FinancialModel, SnapshotDiff } from "../financials/model";
 
 /** Optional external factual context (Perplexity/Fiscal.ai), passed verbatim into prompts. */
@@ -76,10 +76,20 @@ export const LinkExtractResult = z.object({ links: z.array(ExtractedLink).defaul
 export type ExtractedLink = z.infer<typeof ExtractedLink>;
 export type LinkExtractResult = z.infer<typeof LinkExtractResult>;
 
+// ---------- MD&A driver extraction (Phase-4 improvement #3) ----------
+export interface DriverExtractInput {
+  company: { legal_name: string; ticker: string };
+  filing: { form: string };
+  mda_text: string; // bounded MD&A slice
+}
+export const DriversResult = z.object({ drivers: z.array(Driver).default([]) });
+export type DriversResult = z.infer<typeof DriversResult>;
+
 export interface FundamentalsAnalyst {
   frameForward(input: ForwardFrameInput): Promise<ForwardFrame>;
   draftThesis(input: ThesisDraftInput): Promise<ThesisDraft>;
   extractLinks(input: LinkExtractInput): Promise<LinkExtractResult>;
+  extractDrivers(input: DriverExtractInput): Promise<DriversResult>;
 }
 
 function headline(model: FinancialModel): Record<string, number> {
@@ -156,5 +166,23 @@ excerpt names no specific counterparties, return an empty list. Return JSON:
 Excerpt:
 ${input.text}`;
     return completeJSON({ prompt, schema: LinkExtractResult, model: "claude-sonnet-4-6", purpose: "fundamentals.links", maxTokens: 1000 });
+  }
+
+  async extractDrivers(input: DriverExtractInput): Promise<DriversResult> {
+    const prompt = `Read this ${input.filing.form} MD&A excerpt for ${input.company.legal_name} (${input.company.ticker}) and extract the 3-6 most material business drivers management discusses.
+
+For each driver, map it to ONE metric it most affects: revenue | gross_margin | operating_margin | net_margin | net_income | eps. Give management's framing, a short grounding quote from the text, and a bear/base/bull IMPACT as SIGNED PERCENTAGE POINTS:
+  - for "revenue": percentage points added to/subtracted from next-period YoY revenue growth.
+  - for a margin metric: percentage points added to/subtracted from that margin LEVEL.
+Bear = the unfavorable case, bull = the favorable case, base = most likely. A headwind has negative
+base; a tailwind positive. Keep magnitudes realistic (most single drivers move a metric by 0-5 pts).
+Only extract drivers grounded in the text — do NOT invent. Return JSON:
+{"drivers": [{"name": string, "metric": <enum>, "direction": "tailwind|headwind|mixed",
+  "framing": string, "quote": string|null,
+  "impact_pct": {"bear": number, "base": number, "bull": number}}]}
+
+MD&A excerpt:
+${input.mda_text}`;
+    return completeJSON({ prompt, schema: DriversResult, model: "claude-sonnet-4-6", purpose: "fundamentals.drivers", maxTokens: 1600 });
   }
 }

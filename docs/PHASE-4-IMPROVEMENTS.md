@@ -7,11 +7,15 @@ existing code and what it needs from the owner.
 
 ---
 
-> **Status update 2026-06-30:** #1 and #2 are **substantially delivered** via the Perplexity
-> integration bundled into Phase 4 (Perplexity Finance is Fiscal.ai-backed → covers consensus,
-> estimates, beats/misses, and Morningstar-style fair-value/moat data). Remaining: dedicated
-> **transcripts** (still deferred), and #3 (MD&A hypotheses) + #4 (Monte Carlo) are still open and
-> are now the highest-value next steps. See `PHASE-4.md` "Perplexity factual layer".
+> **Status update 2026-06-30 (final):** #1, #2, #3, #4 are all **delivered**.
+> - #1/#2 via the Perplexity/Fiscal.ai integration (consensus, estimates, beats/misses,
+>   Morningstar-style fair-value/moat). Dedicated **transcripts** remain deferred (no source yet).
+> - #3 **MD&A driver extraction** + #4 **Monte Carlo scenario** shipped: the coverage pass reads the
+>   MD&A, extracts bear/base/bull drivers, and runs a pure-TS Monte Carlo (hybrid bounds, beat-prob
+>   vs Perplexity consensus, sensitivity-ranked watch-items). See `PHASE-4.md` and the modules
+>   `lib/financials/montecarlo.ts`, `lib/financials/filing_text.ts`.
+>
+> Only remaining Phase-4 item: **earnings-call transcripts** when a source is provided.
 
 ## 1. Premium data sources (fundamentals + transcripts) — ✅ mostly done via Perplexity/Fiscal.ai
 **Why:** today the engine is XBRL-only (free EDGAR). XBRL gives clean structured numbers but lags

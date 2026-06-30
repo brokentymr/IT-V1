@@ -19,6 +19,16 @@ export interface FundamentalsConfig {
   forwardLeadDays: number;
   /** Filing-document text budget for grounded link enrichment (chars). */
   linkTextBudget: number;
+  /** MD&A section text budget for driver extraction (chars). */
+  mdaTextBudget: number;
+  /** Monte Carlo scenario parameters (Phase-4 improvement #4). */
+  montecarlo: {
+    runs: number;          // simulation count
+    boundSigma: number;    // hybrid bound: a driver's impact is clamped to ±boundSigma×historical σ
+    sensitivityTopN: number; // drivers surfaced as watch-items
+    historyPeriods: number;  // periods of XBRL history used to estimate volatility
+    seed: number;          // RNG seed for reproducibility (override per-run if needed)
+  };
   /** Line items extracted from XBRL company facts. */
   metrics: MetricSpec[];
 }
@@ -27,6 +37,8 @@ export const FUNDAMENTALS_CONFIG: FundamentalsConfig = {
   triggerForms: ["10-K", "10-Q", "8-K", "S-1"],
   forwardLeadDays: 10,
   linkTextBudget: 24_000,
+  mdaTextBudget: 18_000,
+  montecarlo: { runs: 10_000, boundSigma: 2, sensitivityTopN: 3, historyPeriods: 12, seed: 1_234_567 },
   metrics: [
     { key: "revenue", label: "Revenue", unit: "USD", kind: "flow",
       tags: ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"] },

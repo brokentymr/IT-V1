@@ -254,6 +254,51 @@ export const MarketContext = z.object({
 });
 export type MarketContext = z.infer<typeof MarketContext>;
 
+// §4.2 extended hypothesis (Phase-4 improvement #3): drivers read from the filing's MD&A, each with
+// a bear/base/bull impact on a tracked metric. Grounded (quote + filing ref); feeds the Monte Carlo.
+export const MetricKey = z.enum(["revenue", "gross_margin", "operating_margin", "net_margin", "net_income", "eps"]);
+export type MetricKey = z.infer<typeof MetricKey>;
+
+export const Driver = z.object({
+  name: z.string(),
+  metric: MetricKey,
+  direction: z.enum(["tailwind", "headwind", "mixed"]),
+  framing: z.string(),
+  quote: z.string().nullable().optional(),
+  // bear/base/bull impact: percentage points on revenue growth, or on the margin level
+  impact_pct: z.object({ bear: z.number(), base: z.number(), bull: z.number() }),
+});
+export type Driver = z.infer<typeof Driver>;
+
+export const Hypotheses = z.object({
+  as_of: IsoTimestamp,
+  filing_ref: IdRef.nullable().optional(),
+  drivers: z.array(Driver).default([]),
+  provenance: z.array(ProvenanceRef).default([]),
+});
+export type Hypotheses = z.infer<typeof Hypotheses>;
+
+// Monte Carlo scenario (Phase-4 improvement #4): the distribution of next-period outcomes.
+const ScenarioBand = z.object({ p10: z.number(), p50: z.number(), p90: z.number() });
+export const Scenario = z.object({
+  target_period: z.string().nullable(),
+  base_period: z.string().nullable(),
+  runs: z.number().int(),
+  bands: z.object({
+    revenue: ScenarioBand.optional(),
+    net_income: ScenarioBand.optional(),
+    eps: ScenarioBand.optional(),
+    revenue_growth: ScenarioBand.optional(),
+    net_margin: ScenarioBand.optional(),
+  }),
+  beat_probability: z.object({ revenue: z.number().nullable(), eps: z.number().nullable() }),
+  anchor: OpenMap.nullable().optional(),   // the consensus the beat-probability is measured against
+  sensitivity: z.array(z.object({ driver: z.string(), metric: MetricKey, contribution: z.number() })).default([]),
+  watch_items: z.array(z.string()).default([]),
+  provenance: z.array(ProvenanceRef).default([]),
+});
+export type Scenario = z.infer<typeof Scenario>;
+
 export const Snapshot = z.object({
   snapshot_id: Uuid,
   as_of: IsoDate,
@@ -262,6 +307,8 @@ export const Snapshot = z.object({
   filing_ref: IdRef.nullable().optional(),
   fundamentals: Fundamentals.optional(),
   market_context: MarketContext.optional(),
+  hypotheses: Hypotheses.optional(),
+  scenario: Scenario.optional(),
   brand_sentiment: BrandSentiment.optional(),
   signals: Signals.optional(),
   thesis: Thesis.optional(),
@@ -291,6 +338,7 @@ export const CurrentEvents = z.object({
   rolling_outlook: z.string().default(""),
   last_monitored: IsoTimestamp.nullable().optional(),
   forward_note: ForwardNote.nullable().optional(),
+  hypotheses: Hypotheses.nullable().optional(),
   notes: z.array(NewsNote).default([]),
 });
 

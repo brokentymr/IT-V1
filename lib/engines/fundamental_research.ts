@@ -12,12 +12,17 @@
  */
 import { randomUUID } from "node:crypto";
 import { query, withTransaction } from "../db/pool";
-import { SecAdapter } from "../sources/sec";
+import { SecAdapter, type CompanyFacts } from "../sources/sec";
 import { NasdaqEarningsAdapter, resolveNextEarningsDate, type NextDate } from "../sources/earnings";
 import type { PerplexityFinance } from "../sources/perplexity";
-import { extractStatements, buildModel, diffModels, type FinancialModel } from "../financials/model";
+import {
+  extractStatements, buildModel, diffModels, stats,
+  metricYoYGrowths, netMarginLevels, priorYearBaseForNext, type FinancialModel,
+} from "../financials/model";
+import { simulateScenario, mulberry32, type ScenarioOutput } from "../financials/montecarlo";
+import { concentrationExcerpt, extractMdaSection } from "../financials/filing_text";
 import { FUNDAMENTALS_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
-import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT } from "../types";
+import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
 import type { FundamentalsAnalyst } from "./fundamentals_analyst";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
@@ -178,21 +183,8 @@ export interface CoverageResult {
   missing_metrics: string[];
   links_enriched: number;
   read_through_notes: number;
-}
-
-const CONCENTRATION_RE = /(customer|supplier|concentration|account(?:ed|s)? for|substantial portion|distributor|reseller|manufactured by|foundry|partner)/i;
-
-/** Crude HTML→text + a window around concentration/relationship language (grounds link extraction). */
-function concentrationExcerpt(html: string, budget: number): string {
-  const text = html.replace(/<[^>]+>/g, " ").replace(/&[a-z]+;/gi, " ").replace(/\s+/g, " ").trim();
-  const hits: string[] = [];
-  const re = new RegExp(CONCENTRATION_RE, "gi");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) && hits.join(" ").length < budget) {
-    hits.push(text.slice(Math.max(0, m.index - 400), m.index + 400));
-    re.lastIndex = m.index + 800;
-  }
-  return hits.join("\n…\n").slice(0, budget);
+  drivers_extracted: number;
+  scenario: ScenarioOutput | null;
 }
 
 export async function runCoveragePass(opts: {
@@ -207,6 +199,7 @@ export async function runCoveragePass(opts: {
   config?: FundamentalsConfig;
   trigger?: "filing" | "manual";
   asOf?: string;
+  rng?: () => number; // injectable for deterministic Monte Carlo in tests
 }): Promise<CoverageResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -240,6 +233,27 @@ export async function runCoveragePass(opts: {
     forward_expectations: cf.forward?.expectations ?? null,
     market_context: mc ? { consensus: mc.consensus, analyst_view: mc.analyst_view } : undefined,
   });
+
+  // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment).
+  let html: string | null = null;
+  if (opts.filingUrl) {
+    const doc = await sec.fetchFilingDocument(opts.filingUrl).catch(() => null);
+    html = doc?.ok ? doc.data : null;
+  }
+
+  // 3c. MD&A drivers (#3) → Monte Carlo next-period scenario (#4). Both best-effort.
+  let drivers: Driver[] = [];
+  if (html) {
+    const mda = extractMdaSection(html, config.mdaTextBudget);
+    if (mda) {
+      const dr = await opts.analyst.extractDrivers({
+        company: { legal_name: company.legal_name, ticker: company.primary_ticker },
+        filing: { form: opts.formType ?? "Filing" }, mda_text: mda,
+      }).catch((e) => { console.warn(`[coverage] driver extraction failed: ${(e as Error).message}`); return { drivers: [] as Driver[] }; });
+      drivers = dr.drivers;
+    }
+  }
+  const scenario = buildScenario(facts.data, model, drivers, mc?.consensus ?? null, company, config, opts.rng);
 
   const asOf = opts.asOf ?? model.period_end ?? todayIso();
   const cycleLabel = `${opts.formType ?? "Filing"} ${model.fiscal_period ?? asOf}`;
@@ -280,6 +294,14 @@ export async function runCoveragePass(opts: {
       positions_held: (company.coverage?.positions_held as never[]) ?? [],
     });
 
+    // MD&A hypotheses (#3) + Monte Carlo scenario (#4), both provenance-stamped to the filing.
+    const hypothesesBlock = drivers.length
+      ? { as_of: new Date().toISOString(), filing_ref: opts.accession, drivers, provenance: [{ claim_id: "hypotheses", source_ref: sourceId }] }
+      : undefined;
+    const scenarioBlock = scenario
+      ? { ...scenario, anchor: (mc?.consensus as Record<string, unknown> | null) ?? null, provenance: [{ claim_id: "scenario", source_ref: sourceId }] }
+      : undefined;
+
     const content = {
       fundamentals: {
         statements: line_items,
@@ -287,6 +309,8 @@ export async function runCoveragePass(opts: {
         provenance: Object.keys(line_items).map((k) => ({ claim_id: `fundamentals.${k}`, source_ref: sourceId })),
       },
       ...(marketContext ? { market_context: marketContext } : {}),
+      ...(hypothesesBlock ? { hypotheses: hypothesesBlock } : {}),
+      ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
       thesis,
       events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
     };
@@ -300,10 +324,16 @@ export async function runCoveragePass(opts: {
     );
   });
 
-  // 5. Link enrichment from the filing text (grounded, best-effort, links only to known companies).
+  // 5. Carry hypotheses into current_events (the next forward pass reads them); enrich links from html.
+  if (drivers.length) {
+    await query(
+      "UPDATE canonical_files SET current_events = jsonb_set(current_events, '{hypotheses}', $2::jsonb) WHERE id = $1",
+      [cf.id, JSON.stringify({ as_of: new Date().toISOString(), filing_ref: opts.accession, drivers, provenance: [] })],
+    ).catch((e) => console.warn(`[coverage] hypotheses persist failed: ${(e as Error).message}`));
+  }
   let linksEnriched = 0;
-  if (opts.filingUrl) {
-    linksEnriched = await enrichLinksFromFiling(opts, company, sec, config).catch((e) => {
+  if (html) {
+    linksEnriched = await enrichLinks(opts, company, html, config).catch((e) => {
       console.warn(`[coverage] link enrichment failed: ${(e as Error).message}`);
       return 0;
     });
@@ -324,19 +354,52 @@ export async function runCoveragePass(opts: {
     company_id: company.id, snapshot_id: snapshotId, as_of: asOf, cycle_label: cycleLabel,
     conviction: draft.conviction, metrics_extracted: Object.keys(line_items).length,
     missing_metrics: missing, links_enriched: linksEnriched, read_through_notes: readThroughNotes,
+    drivers_extracted: drivers.length, scenario,
   };
 }
 
-/** Read named counterparties out of the filing and upsert links to companies already in our universe. */
-async function enrichLinksFromFiling(
-  opts: { accession: string; formType?: string | null; filingUrl?: string | null; analyst: FundamentalsAnalyst },
+/** Build the Monte Carlo next-period scenario from MD&A drivers + XBRL history + consensus. */
+function buildScenario(
+  facts: CompanyFacts,
+  model: FinancialModel,
+  drivers: Driver[],
+  consensus: unknown,
   company: CompanyRow,
-  sec: SecAdapter,
+  config: FundamentalsConfig,
+  rng?: () => number,
+): ScenarioOutput | null {
+  if (!drivers.length) return null;
+  const base = priorYearBaseForNext(facts, "revenue", model.period_end ?? todayIso(), config);
+  const ni = model.line_items.net_income?.value;
+  const rev = model.line_items.revenue?.value;
+  const epsD = model.line_items.eps_diluted?.value;
+  const netMargin = model.ratios.net_margin ?? (ni && rev ? ni / rev : undefined);
+  if (!base || netMargin == null) return null;
+  return simulateScenario({
+    drivers,
+    revenue_prior_year: base.value,
+    base_period: base.period_end,
+    target_period: company.next_earnings_date ?? null,
+    net_margin: netMargin,
+    shares: epsD && epsD !== 0 && ni ? ni / epsD : null,
+    revenue_growth: stats(metricYoYGrowths(facts, "revenue", config)),
+    net_margin_stdev: stats(netMarginLevels(facts, config)).stdev,
+    consensus: consensus as { revenue_estimate_usd?: number | null; eps_estimate?: number | null } | null,
+    runs: config.montecarlo.runs,
+    boundSigma: config.montecarlo.boundSigma,
+    sensitivityTopN: config.montecarlo.sensitivityTopN,
+    rng: rng ?? mulberry32(config.montecarlo.seed),
+  });
+}
+
+/** Read named counterparties out of the filing and upsert links to companies already in our universe. */
+async function enrichLinks(
+  opts: { accession: string; formType?: string | null; analyst: FundamentalsAnalyst },
+  company: CompanyRow,
+  html: string,
   config: FundamentalsConfig,
 ): Promise<number> {
-  const doc = await sec.fetchFilingDocument(opts.filingUrl as string);
-  if (!doc.ok || !doc.data) return 0;
-  const text = concentrationExcerpt(doc.data, config.linkTextBudget);
+  const text = concentrationExcerpt(html, config.linkTextBudget);
   if (!text) return 0;
 
   const extracted = await opts.analyst.extractLinks({

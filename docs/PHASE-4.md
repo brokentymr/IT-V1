@@ -83,11 +83,29 @@ covers what we'd otherwise pull from Fiscal.ai **and** Morningstar (no separate 
   stored consensus (EPS $1.88 / rev $108.9B / last quarter "Beat") + Morningstar fair value $270,
   wide moat. Eval stayed 4/4 with triggers now citing consensus levels. 53/53 tests pass.
 
+## MD&A hypotheses + Monte Carlo scenario (improvements #3 + #4, added 2026-06-30)
+The coverage pass now also turns the filing's narrative into a probabilistic forward view.
+- **#3 drivers** (`lib/financials/filing_text.ts` + analyst `extractDrivers`): slice the MD&A
+  (10-K Item 7 / 10-Q Item 2) from the filing we already fetch, extract 3-6 grounded **drivers**,
+  each mapped to a tracked metric with a bear/base/bull % impact + a quote. Stored as a
+  provenance-stamped `content.hypotheses` block and carried into `current_events.hypotheses`.
+- **#4 Monte Carlo** (`lib/financials/montecarlo.ts`, pure TS, seeded RNG): sample ~10k runs over
+  the driver ranges (triangular) **bounded by the metric's own historical volatility** (hybrid,
+  owner decision) + historical-variance noise → P10/P50/P90 for next-period revenue / net income /
+  EPS, a **beat-probability vs the Perplexity consensus**, an analytic **sensitivity ranking**, and
+  measurable **watch-items**. Stored as `content.scenario`.
+- **XBRL duration trap fixed:** the volatility/base series filter to consistent ~3-month periods
+  (a concept tags 3/6/9-month + annual values under one unit; mixing them produced nonsense growth).
+- **Live (AAPL Q2-2026 10-Q):** 6 drivers; median revenue **$108.8B vs $108.9B consensus**, EPS
+  median $1.91 vs $1.88 (53% beat-prob), net margin P10-P90 22-30%; top driver (Product revenue) =
+  80% of outcome variance. Pure-TS sim is free; the one MD&A call ran under Haiku (~$0.036 total run).
+
 ## DoD — met
 Forward + coverage passes run; a real filing produces a **sourced, schema-valid snapshot with a
 thesis and a diff**; links get enriched from the filing; read-through propagates; append-only holds;
 external factual context (Perplexity/Fiscal.ai) flows in as advisory, provenance-stamped market
-context; cost tracked + ceiling-guarded (month spend ~$0.16, all engines).
+context; MD&A drivers + a Monte Carlo next-period scenario (bands, beat-prob, sensitivity,
+watch-items) are produced and stored; cost tracked + ceiling-guarded (month spend ~$0.23, all engines).
 
 ## Open items (carried forward)
 - **Transcripts** deferred until a source is available (filing-only today).

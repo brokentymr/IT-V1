@@ -6,6 +6,7 @@ import { SecAdapter } from "../lib/sources/sec";
 import type { JsonFetcher, TextFetcher } from "../lib/sources/types";
 import type { FundamentalsAnalyst } from "../lib/engines/fundamentals_analyst";
 import { PerplexityClient, PerplexityFinance, type PerplexityFetcher } from "../lib/sources/perplexity";
+import { mulberry32 } from "../lib/financials/montecarlo";
 import { runCoveragePass, runForwardPass } from "../lib/engines/fundamental_research";
 
 const AAPL_CIK = "0000320193";
@@ -46,7 +47,10 @@ const jsonFetcher: JsonFetcher = async (url) => {
 };
 const textFetcher: TextFetcher = async () => ({
   status: 200,
-  text: "<p>Our largest customer, Dell Technologies, accounted for a substantial portion of net sales.</p>",
+  text: "<h2>Management's Discussion and Analysis of Financial Condition</h2>" +
+    "<p>Our largest customer, Dell Technologies, accounted for a substantial portion of net sales. " +
+    "Services growth continued while component costs rose.</p>" +
+    "<h2>Quantitative and Qualitative Disclosures About Market Risk</h2>",
 });
 
 // Fake LLM analyst: deterministic forward frame, thesis (with a specific invalidation trigger),
@@ -59,6 +63,12 @@ const analyst: FundamentalsAnalyst = {
   async draftThesis() {
     return { one_liner: "Margin-led compounder", long_form: "Long form.", actual_vs_expected: "Beat on revenue.",
       tensions: ["China demand"], invalidation_triggers: ["Net income margin falls below 20% for two quarters"], conviction: 4 };
+  },
+  async extractDrivers() {
+    return { drivers: [
+      { name: "Services growth", metric: "revenue" as const, direction: "tailwind" as const, framing: "Services momentum", quote: "Services growth continued", impact_pct: { bear: -1, base: 1.5, bull: 4 } },
+      { name: "Component costs", metric: "gross_margin" as const, direction: "headwind" as const, framing: "Input cost pressure", quote: "component costs rose", impact_pct: { bear: -3, base: -1, bull: 0 } },
+    ] };
   },
   async extractLinks() {
     return { links: [{ name: "Dell Technologies", ticker: "DELL", type: "customer", materiality: "medium", rationale: "named customer" }] };
@@ -113,10 +123,12 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
   it("extracts a grounded snapshot with thesis + diff, enriches links, and reads through", async () => {
     const r = await runCoveragePass({
       companyId: id.AAPL, accession: ACC, formType: "10-Q", filingUrl: "https://sec.gov/x/aapl-20240629.htm",
-      analyst, newsAnalyzer, finance, sec, trigger: "manual",
+      analyst, newsAnalyzer, finance, sec, trigger: "manual", rng: mulberry32(42),
     });
 
     expect(r.metrics_extracted).toBe(2);            // revenue + net_income
+    expect(r.drivers_extracted).toBe(2);            // MD&A drivers (#3)
+    expect(r.scenario).not.toBeNull();              // Monte Carlo scenario (#4)
     expect(r.conviction).toBe(4);
     expect(r.links_enriched).toBe(1);               // AAPL→DELL created from filing text
     expect(r.read_through_notes).toBe(1);           // HPQ only (DELL gated immaterial)
@@ -138,6 +150,16 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
     expect(row.content.market_context.consensus.revenue_estimate_usd).toBe(94_000_000_000);
     expect(row.content.market_context.analyst_view.economic_moat).toBe("wide");
     expect(row.content.market_context.provenance[0].source_ref).toBeTruthy();
+    // MD&A hypotheses (#3) + Monte Carlo scenario (#4) stored on the snapshot
+    expect(row.content.hypotheses.drivers.length).toBe(2);
+    expect(row.content.hypotheses.provenance[0].source_ref).toBeTruthy();
+    const sc = row.content.scenario;
+    expect(sc.bands.revenue.p10).toBeLessThan(sc.bands.revenue.p50);
+    expect(sc.bands.revenue.p50).toBeLessThan(sc.bands.revenue.p90);
+    expect(sc.beat_probability.revenue).toBeGreaterThanOrEqual(0);
+    expect(sc.beat_probability.revenue).toBeLessThanOrEqual(1);
+    expect(sc.watch_items.length).toBeGreaterThan(0);
+    expect(sc.sensitivity.length).toBe(2);
     // first snapshot has no prior → diff metrics are "new"
     expect(row.diff.metrics.find((m: { key: string }) => m.key === "revenue").direction).toBe("new");
 
