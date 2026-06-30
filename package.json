@@ -12,11 +12,13 @@
     "migrate": "tsx scripts/migrate.ts",
     "ingest": "tsx scripts/ingest.ts",
     "worker": "tsx scripts/worker.ts",
+    "monitor": "tsx scripts/monitor.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1076.0",
+    "fast-xml-parser": "^5.9.3",
     "next": "^15",
     "pg": "^8",
     "pg-boss": "^10.4.2",

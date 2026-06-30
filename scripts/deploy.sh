@@ -12,9 +12,12 @@ npm run migrate
 # Sync systemd units + Caddy config from the repo (source of truth).
 install -m 644 deploy/it-v1.service /etc/systemd/system/it-v1.service
 install -m 644 deploy/it-v1-worker.service /etc/systemd/system/it-v1-worker.service
+install -m 644 deploy/it-v1-monitor.service /etc/systemd/system/it-v1-monitor.service
+install -m 644 deploy/it-v1-monitor.timer /etc/systemd/system/it-v1-monitor.timer
 install -m 644 deploy/Caddyfile /etc/caddy/Caddyfile
 systemctl daemon-reload
 systemctl restart it-v1 it-v1-worker
+systemctl enable --now it-v1-monitor.timer
 systemctl reload caddy
 
 for _ in $(seq 1 20); do

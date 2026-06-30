@@ -14,6 +14,13 @@ await boss.work(JOB.COVERAGE_PASS, async (jobs) => {
   }
 });
 
+await boss.work(JOB.SENTIMENT_RUN, async (jobs) => {
+  for (const job of jobs) {
+    // Phase 3: placeholder. Engine 4 (Brand/Sentiment) runs the escalated window in Phase 7.
+    console.log(`[worker] ${JOB.SENTIMENT_RUN}`, JSON.stringify(job.data));
+  }
+});
+
 console.log(`[worker] started; subscribed to: ${Object.values(JOB).join(", ")}`);
 
 for (const sig of ["SIGTERM", "SIGINT"] as const) {

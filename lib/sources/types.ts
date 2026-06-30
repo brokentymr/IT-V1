@@ -20,3 +20,6 @@ export interface SourceResult<T> {
 
 /** Injectable JSON fetcher so adapters can be tested against recorded fixtures, not live APIs. */
 export type JsonFetcher = (url: string) => Promise<{ status: number; body: unknown }>;
+
+/** Injectable text fetcher (e.g. for RSS/XML) — fixture-backed in tests. */
+export type TextFetcher = (url: string, headers?: Record<string, string>) => Promise<{ status: number; text: string }>;
