@@ -1,5 +1,4 @@
-# Investing Together — reverse proxy with automatic HTTPS.
-# Source of truth for /etc/caddy/Caddyfile (copy + `systemctl reload caddy` to apply).
+# Investing Together — reverse proxy with automatic HTTPS (Phase 2).
 {
 	email brokentymr@gmail.com
 }
@@ -8,5 +7,9 @@
 # redirects HTTP→HTTPS. Webhooks land at https://markets.kuramoto.io/api/webhooks/*.
 markets.kuramoto.io {
 	encode gzip
+	log {
+		output file /var/log/caddy/access.log
+		format json
+	}
 	reverse_proxy localhost:3000
 }

@@ -71,9 +71,18 @@ describe("Webhooks (integration: ephemeral Postgres)", () => {
     expect(await count(db, "SELECT count(*)::int n FROM signal_events WHERE kind='tradingview_alert'")).toBe(1);
   });
 
-  it("returns unknown_company for a symbol outside the universe", async () => {
-    const r = await processTradingViewWebhook(JSON.stringify({ secret: tvSecret, ticker: "ZZZZ", id: "tv-z" }));
-    expect(r.status).toBe("unknown_company");
+  it("retains an unrouted OHLC signal for a non-company symbol (e.g. NQ!), via URL secret", async () => {
+    // URL-secret path (2nd arg); body carries no secret, just OHLCV.
+    const body = JSON.stringify({ symbol: "NQ1!", tf: "3", o: 20000, h: 20010, l: 19990, c: 20005, v: 1234, t: "2026-06-30T04:00:00Z", id: "nq-1" });
+    const r = await processTradingViewWebhook(body, tvSecret);
+    expect(r.status).toBe("ok");
+    expect(r.routed).toBe(false);
+    expect(r.company_id).toBeNull();
+
+    const { rows } = await db.pool.query("SELECT * FROM signal_events WHERE symbol='NQ1!'");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].company_id).toBeNull();
+    expect(rows[0].payload.ohlc).toEqual({ open: 20000, high: 20010, low: 19990, close: 20005, volume: 1234 });
   });
 
   // ---- Filing ----
