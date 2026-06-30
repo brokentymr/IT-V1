@@ -3,14 +3,21 @@
 import { loadEnv } from "../lib/env";
 import { getBoss, stopBoss } from "../lib/queue/boss";
 import { JOB } from "../lib/queue/types";
+import { handleCoveragePass, type CoverageJobData } from "../lib/jobs/coverage";
 
 loadEnv();
 const boss = await getBoss();
 
 await boss.work(JOB.COVERAGE_PASS, async (jobs) => {
   for (const job of jobs) {
-    // Phase 2: placeholder. Engine 2 (Fundamental Research) runs the coverage pass in Phase 4.
-    console.log(`[worker] ${JOB.COVERAGE_PASS}`, JSON.stringify(job.data));
+    // Engine 2 (Fundamental Research) coverage pass on filing arrival (Phase 4).
+    try {
+      const r = await handleCoveragePass(job.data as CoverageJobData);
+      console.log(`[worker] ${JOB.COVERAGE_PASS} ok`, JSON.stringify(r));
+    } catch (err) {
+      console.error(`[worker] ${JOB.COVERAGE_PASS} failed`, (err as Error).message);
+      throw err; // let pg-boss retry
+    }
   }
 });
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll EDGAR for new filings of covered companies
+
+[Timer]
+# A few hours after the daily monitor; EDGAR posts most filings overnight ET.
+OnCalendar=*-*-* 11:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

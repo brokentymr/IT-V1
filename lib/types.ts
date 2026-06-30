@@ -110,7 +110,8 @@ export type CompanyIdentifiers = z.infer<typeof CompanyIdentifiers>;
 export const Coverage = z.object({
   status: CoverageStatus,
   authors: z.array(z.string()).default([]),
-  next_earnings_date: IsoDate.nullable().optional(),
+  next_earnings_date: IsoDate.nullable().optional(),          // current best estimate (auto-resolved)
+  next_earnings_date_override: IsoDate.nullable().optional(), // explicit owner override; wins if set
   positions_held: z.array(Position).default([]),
 });
 export type Coverage = z.infer<typeof Coverage>;
@@ -244,6 +245,15 @@ export const Thesis = z.object({
   positions_held: z.array(Position).default([]),
 });
 
+// External factual context (Perplexity / Fiscal.ai): consensus + analyst view. ADVISORY — never
+// the modeled-number source of truth (that is `fundamentals`, computed from XBRL); provenance-stamped.
+export const MarketContext = z.object({
+  consensus: OpenMap.nullable().optional(),
+  analyst_view: OpenMap.nullable().optional(),
+  provenance: z.array(ProvenanceRef).default([]),
+});
+export type MarketContext = z.infer<typeof MarketContext>;
+
 export const Snapshot = z.object({
   snapshot_id: Uuid,
   as_of: IsoDate,
@@ -251,6 +261,7 @@ export const Snapshot = z.object({
   trigger: SnapshotTrigger,
   filing_ref: IdRef.nullable().optional(),
   fundamentals: Fundamentals.optional(),
+  market_context: MarketContext.optional(),
   brand_sentiment: BrandSentiment.optional(),
   signals: Signals.optional(),
   thesis: Thesis.optional(),
@@ -263,9 +274,23 @@ export const Snapshot = z.object({
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 
+// §4.2 forward pass: framed expectations + confirm/break conditions, staged into current_events
+// as the next filing date approaches. The coverage pass measures the actual filing against it.
+export const ForwardNote = z.object({
+  as_of: IsoTimestamp,
+  next_earnings_date: IsoDate.nullable(),
+  expectations: z.string(),               // what the market expects / what this print needs to show
+  focus_metrics: z.array(z.string()).default([]),
+  confirm_conditions: z.array(z.string()).default([]),  // would CONFIRM the current thesis
+  break_conditions: z.array(z.string()).default([]),    // would BREAK it (candidate invalidation triggers)
+  source: z.string().default("forward_pass"),
+});
+export type ForwardNote = z.infer<typeof ForwardNote>;
+
 export const CurrentEvents = z.object({
   rolling_outlook: z.string().default(""),
   last_monitored: IsoTimestamp.nullable().optional(),
+  forward_note: ForwardNote.nullable().optional(),
   notes: z.array(NewsNote).default([]),
 });
 

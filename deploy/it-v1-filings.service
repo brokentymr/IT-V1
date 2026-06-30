@@ -1,0 +1,12 @@
+[Unit]
+Description=Investing Together — daily EDGAR filing poll (Engine 2 trigger)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/IT-V1
+EnvironmentFile=/opt/IT-V1/.env
+Environment=NODE_ENV=production
+ExecStart=/opt/IT-V1/node_modules/.bin/tsx scripts/poll-filings.ts
+User=root

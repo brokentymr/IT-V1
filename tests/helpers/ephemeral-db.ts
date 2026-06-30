@@ -36,7 +36,24 @@ export async function createEphemeralDb(): Promise<Ephemeral> {
       await pool.end();
       const a = new Client({ connectionString: adminUrl });
       await a.connect();
-      await a.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      // Avoid DROP ... WITH (FORCE): it terminates EVERY backend on the DB, and the non-superuser
+      // it_v1 role can't signal backends it doesn't own → "permission denied to terminate process"
+      // under parallel test load. Instead block new connections, terminate only our own lingering
+      // sessions (always permitted), then plain-DROP with a short retry.
+      await a.query("UPDATE pg_database SET datallowconn = false WHERE datname = $1", [name]).catch(() => {});
+      await a.query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+        [name],
+      ).catch(() => {});
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await a.query(`DROP DATABASE IF EXISTS ${name}`);
+          break;
+        } catch (err) {
+          if (attempt >= 5) { await a.end(); throw err; }
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+        }
+      }
       await a.end();
     },
   };
