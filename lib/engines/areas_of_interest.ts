@@ -74,11 +74,17 @@ export async function loadOpenAreas(companyId: string): Promise<OpenArea[]> {
   return rows;
 }
 
-/** Apply the desk's adjudication: resolve / carry-forward the open areas it ruled on. */
+/** Set/refresh an area's summary (e.g. the price-move attribution explanation). */
+export async function annotateArea(id: string, summary: string): Promise<void> {
+  await query("UPDATE areas_of_interest SET summary = $2, updated_at = now() WHERE id = $1", [id, summary]);
+}
+
+/** Apply an adjudication: resolve / carry-forward the open areas ruled on. The resolver may be a
+ *  filing (accession + snapshotId) or a price move (accession = "price:<date>", snapshotId = null). */
 export async function applyResolutions(opts: {
   companyId: string;
   accession: string;
-  snapshotId: string;
+  snapshotId: string | null;
   revisitAfter: string | null;
   resolutions: Array<{ theme: string; verdict: ResolutionVerdict; note: string }>;
 }): Promise<{ resolved: number; carried: number }> {

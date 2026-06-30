@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Investing Together price-anomaly monitor (after US market close)
+
+[Timer]
+OnCalendar=*-*-* 22:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

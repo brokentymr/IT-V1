@@ -15,7 +15,10 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
     <div className="wrap">
       <div className="spread" style={{ marginBottom: "1rem" }}>
         <h1 style={{ margin: 0 }}>Universe</h1>
-        <span className="muted">{rows.length} asset{rows.length === 1 ? "" : "s"}</span>
+        <div className="row">
+          <a href="/calendar" className="faint">calendar →</a>
+          <span className="muted">{rows.length} asset{rows.length === 1 ? "" : "s"}</span>
+        </div>
       </div>
 
       <div className="grid cols-2">

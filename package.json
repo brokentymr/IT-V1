@@ -15,6 +15,8 @@
     "monitor": "tsx scripts/monitor.ts",
     "fundamentals": "tsx scripts/fundamentals.ts",
     "poll-filings": "tsx scripts/poll-filings.ts",
+    "schedule-forward": "tsx scripts/schedule-forward.ts",
+    "price-monitor": "tsx scripts/price-monitor.ts",
     "eval:fundamentals": "tsx scripts/eval-fundamentals.ts",
     "test": "vitest run",
     "test:watch": "vitest"

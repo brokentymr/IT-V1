@@ -100,6 +100,7 @@ export async function runForwardPass(opts: {
   config?: FundamentalsConfig;
   today?: string;
   force?: boolean;
+  dedupe?: boolean; // skip framing if a forward note is already staged for this exact earnings date
 }): Promise<ForwardResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -137,6 +138,13 @@ export async function runForwardPass(opts: {
 
   // Pre-warm the standing model (latest reported figures, no accession filter).
   const cf = await ensureCanonicalFile(company.id);
+
+  // No-duplicate guard (the scheduler): a forward note already staged for THIS exact earnings date
+  // means the cycle is pre-warmed — skip the (costly) re-frame. A moved date won't match, so it re-stages.
+  if (opts.dedupe && !opts.force && next.date && cf.forward?.next_earnings_date === next.date) {
+    return { company_id: company.id, next_earnings_date: next.date, date_method: next.method, days_until: daysUntil, within_window: true, focus_metrics: cf.forward.focus_metrics ?? [], wrote: false };
+  }
+
   let standing: FinancialModel | null = null;
   if (company.cik) {
     const facts = await sec.companyFacts(company.cik);

@@ -1,0 +1,12 @@
+[Unit]
+Description=Investing Together — forward-pass scheduler (Phase 6)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/IT-V1
+EnvironmentFile=/opt/IT-V1/.env
+Environment=NODE_ENV=production
+ExecStart=/opt/IT-V1/node_modules/.bin/tsx scripts/schedule-forward.ts
+User=root
