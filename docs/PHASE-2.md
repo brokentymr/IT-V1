@@ -47,13 +47,17 @@ Both webhook paths verified end-to-end on the droplet; signed, idempotent, prove
 coverage-pass trigger fires into pg-boss and the worker consumes it. **Remaining for full DoD:** a
 live TradingView alert from the owner's account (handoff below).
 
-## Owner handoff — connect a live TradingView alert
-In TradingView → create/edit an alert → **Notifications → Webhook URL**:
-`https://markets.kuramoto.io/api/webhooks/tradingview`, and set the **Message** to JSON including the
-shared secret (value in `.env` `TRADINGVIEW_WEBHOOK_SECRET`):
+## TradingView setup (URL-secret + OHLCV) — live-confirmed
+Secret lives in the **URL path** so the message is pure data:
+- **Webhook URL:** `https://markets.kuramoto.io/api/webhooks/tradingview/<TRADINGVIEW_WEBHOOK_SECRET>`
+- **Message:**
 ```json
-{"secret":"<TRADINGVIEW_WEBHOOK_SECRET>","ticker":"AAPL","indicator":"RSI","signal":"{{strategy.order.action}}","timeframe":"{{interval}}","price":{{close}},"time":"{{timenow}}"}
+{"symbol":"{{ticker}}","tf":"{{interval}}","o":{{open}},"h":{{high}},"l":{{low}},"c":{{close}},"v":{{volume}},"t":"{{time}}"}
 ```
+Captures full OHLCV per candle into `signal_events.payload.ohlc`. Symbols in the universe attach to
+their company; others (e.g. `NQ!` futures) are retained unrouted (`company_id` null). `{{time}}` is
+parsed as epoch-millis. The body-secret form is still accepted for back-compat. **Verified live**
+with a real NQ 3-minute alert landing over HTTPS (2026-06-30).
 
 ## Open items (carried forward)
 - TradingView has no HMAC; auth is the shared-secret token (rotate by regenerating the env value).

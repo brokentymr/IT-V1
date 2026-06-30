@@ -19,6 +19,20 @@ function num(v: unknown): number | null {
 function str(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
+/** Parse a timestamp: ISO, epoch seconds, or epoch millis (TradingView {{time}}); else server now. */
+function parseTimestamp(v: unknown): string {
+  if (typeof v === "string" || typeof v === "number") {
+    const s = String(v).trim();
+    if (/^\d{10,16}$/.test(s)) {
+      const ms = s.length <= 10 ? Number(s) * 1000 : Number(s);
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+    }
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return new Date().toISOString();
+}
 
 /**
  * Process a TradingView alert (spec §4.1 signal path).
@@ -47,10 +61,7 @@ export async function processTradingViewWebhook(rawBody: string, urlSecret?: str
   const ticker = str(payload.ticker);
   if (!symbol && !ticker) return { status: "bad_request" };
 
-  const rawTime =
-    typeof payload.t === "string" ? payload.t : typeof payload.time === "string" ? payload.time : null;
-  const parsed = rawTime ? new Date(rawTime) : null;
-  const ts = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
+  const ts = parseTimestamp(payload.t ?? payload.time);
 
   const timeframe = str(payload.tf) ?? str(payload.timeframe);
   const ohlc = {
