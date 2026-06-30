@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Investing Together — one-command deploy (Phase 0).
-# Pulls the branch, installs deps, builds, and restarts the systemd-managed app.
+# Investing Together — one-command deploy.
+# Pulls the branch, installs deps, builds, migrates, syncs infra config, restarts services.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 git pull --ff-only
 npm ci
 npm run build
+npm run migrate
 
-# Keep the installed unit in sync with the repo copy, then restart.
+# Sync systemd units + Caddy config from the repo (source of truth).
 install -m 644 deploy/it-v1.service /etc/systemd/system/it-v1.service
+install -m 644 deploy/it-v1-worker.service /etc/systemd/system/it-v1-worker.service
+install -m 644 deploy/Caddyfile /etc/caddy/Caddyfile
 systemctl daemon-reload
-systemctl restart it-v1
+systemctl restart it-v1 it-v1-worker
+systemctl reload caddy
 
-# wait for readiness
 for _ in $(seq 1 20); do
   curl -sf -o /dev/null http://localhost:3000/ && break || sleep 1
 done
-echo "deployed — it-v1.service is $(systemctl is-active it-v1), serving on :3000 (Caddy fronts :80)"
+echo "deployed — it-v1=$(systemctl is-active it-v1) worker=$(systemctl is-active it-v1-worker) caddy=$(systemctl is-active caddy)"

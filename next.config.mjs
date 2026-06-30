@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // pg is a server-only dependency; keep it external to the server bundle.
-  serverExternalPackages: ['pg'],
+  // Server-only deps; keep them external to the server bundle.
+  serverExternalPackages: ['pg', 'pg-boss', '@aws-sdk/client-s3'],
 };
 
 export default nextConfig;

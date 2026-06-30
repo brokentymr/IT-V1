@@ -1,0 +1,17 @@
+[Unit]
+Description=Investing Together (pg-boss worker)
+After=network-online.target postgresql.service it-v1.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/IT-V1
+EnvironmentFile=/opt/IT-V1/.env
+Environment=NODE_ENV=production
+ExecStart=/opt/IT-V1/node_modules/.bin/tsx scripts/worker.ts
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
