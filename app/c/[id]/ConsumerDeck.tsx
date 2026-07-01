@@ -7,6 +7,7 @@ interface Props {
   status: { label: string; tone: string };
   building: boolean; progress: Array<{ step: string; status: string; detail: string }>;
   deckId: string | null; cards: Card[];
+  confidence: number | null; disclosure: string;
 }
 
 const BAR: Record<string, string> = { bull: "#34d399", bear: "#f87171", warn: "#fbbf24", info: "#60a5fa", neutral: "#8b93a7" };
@@ -42,6 +43,14 @@ export default function ConsumerDeck(p: Props) {
         </div>
       ) : null}
 
+      {!p.building && p.confidence != null ? (
+        <div style={{ textAlign: "center", padding: "0 1rem .3rem" }}>
+          <span style={{ fontSize: ".68rem", color: "#8b93a7", border: "1px solid #2a2e37", borderRadius: 999, padding: ".15rem .6rem" }}>
+            Desk confidence {Math.round(p.confidence * 100)}%
+          </span>
+        </div>
+      ) : null}
+
       <section
         onTouchStart={(e) => setTouchX(e.touches[0].clientX)}
         onTouchEnd={(e) => { if (touchX != null) { const dx = e.changedTouches[0].clientX - touchX; if (dx < -40) go(1); if (dx > 40) go(-1); setTouchX(null); } }}
@@ -63,6 +72,8 @@ export default function ConsumerDeck(p: Props) {
         {p.deckId ? <a href={`/content/deck/${p.deckId}`} style={{ ...btn(false), textDecoration: "none", display: "inline-flex", alignItems: "center" }}>Open the full deck</a> : <span style={{ fontSize: ".72rem", opacity: .4, alignSelf: "center" }}>{i + 1} / {n}</span>}
         <button onClick={() => go(1)} disabled={i === n - 1} style={btn(i === n - 1)}>›</button>
       </div>
+
+      <p style={{ fontSize: ".64rem", lineHeight: 1.5, color: "#5a606e", padding: "0 1.4rem 1.8rem", margin: 0, textAlign: "center" }}>{p.disclosure}</p>
     </div>
   );
 }

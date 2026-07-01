@@ -89,6 +89,6 @@ export async function processFilingWebhook(
     accession,
     form_type: formType,
     filing_url: filingUrl,
-  });
+  }, { singletonKey: `coverage:${outcome.company_id}:${accession}` }); // dedupe webhook+poll for one filing
   return { ...outcome, job_id: jobId };
 }

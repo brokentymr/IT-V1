@@ -23,6 +23,29 @@ export function concentrationExcerpt(html: string, budget: number): string {
   return hits.join("\n…\n").slice(0, budget);
 }
 
+/** Windows around caller-supplied keywords — the deepening loop's targeted re-read of the filing to
+ *  chase down unverified claims / missing sources without re-feeding the whole document. */
+export function keywordExcerpts(html: string, keywords: string[], budget: number): string {
+  if (!keywords.length || budget <= 0) return "";
+  const text = htmlToText(html);
+  const lower = text.toLowerCase();
+  const hits: string[] = [];
+  for (const kw of keywords) {
+    const k = kw.toLowerCase().trim();
+    if (k.length < 4) continue;
+    let from = 0;
+    let perKw = 0;
+    let idx = lower.indexOf(k, from);
+    while (idx >= 0 && perKw < 2 && hits.join(" ").length < budget) {
+      hits.push(text.slice(Math.max(0, idx - 300), idx + 300));
+      perKw++;
+      from = idx + 600;
+      idx = lower.indexOf(k, from);
+    }
+  }
+  return hits.join("\n…\n").slice(0, budget);
+}
+
 const MDA_START = /Management.{0,3}s Discussion and Analysis/gi;
 const MDA_END = /(Quantitative and Qualitative Disclosures|Controls and Procedures|Item\s+[34][A-Za-z]?\b|Financial Statements and Supplementary|Legal Proceedings)/i;
 

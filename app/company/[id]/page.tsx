@@ -1,7 +1,9 @@
 import { notFound } from "next/navigation";
 import { getCompanyDetail } from "../../../lib/views/company";
-import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, addLink, setLinkStatus, deleteLink } from "../../actions";
+import { loadCompanyChats } from "../../../lib/engines/company_chat";
+import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, vetoThesis, rollbackPublish, addLink, setLinkStatus, deleteLink } from "../../actions";
 import { generateContentAction } from "../../content-actions";
+import CompanyChat from "./CompanyChat";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +26,7 @@ interface SnapContent {
   research?: {
     panel?: Array<{ lens: string; summary: string; key_points?: string[]; risks?: string[]; confidence: number }>;
     verification?: { confidence: number; missing_sources?: string[]; recommendation: string; verdicts?: Array<{ claim: string; status: string; note: string }> };
+    deepening?: { rounds?: Array<{ lever: string; confidence: number }>; cleared?: boolean; stopped_reason?: string; tiers_used?: string[]; llm_calls_total?: number } | null;
   };
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
@@ -38,6 +41,7 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
   const diff = (latest?.diff ?? {}) as Diff;
   const sc = content.scenario;
   const thesis = approval?.edited_thesis ? { ...content.thesis, ...(approval.edited_thesis as object) } : content.thesis;
+  const chats = await loadCompanyChats(id);
 
   return (
     <div className="wrap">
@@ -161,21 +165,34 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
             {latest ? (
               <div style={{ marginTop: ".8rem", borderTop: "1px solid var(--border)", paddingTop: ".8rem" }}>
                 {approval ? (
-                  <div className="row"><span className="tag good">✓ approved</span><span className="faint">{approval.approved_at.replace("T", " ")} · {approval.approved_by}</span></div>
+                  <div className="grid" style={{ gap: ".4rem" }}>
+                    <div className="row">
+                      <span className={`tag ${approval.status === "vetoed" ? "bad" : "good"}`}>{approval.status === "vetoed" ? "✕ vetoed" : "✓ approved"}</span>
+                      <span className="faint">{approval.approved_at.replace("T", " ")} · {approval.approved_by}</span>
+                    </div>
+                    {approval.status !== "vetoed" ? (
+                      <div className="row" style={{ gap: ".4rem" }}>
+                        <form action={vetoThesis} className="inline"><input type="hidden" name="company_id" value={h.id} /><input type="hidden" name="snapshot_id" value={latest.snapshot_id} /><button className="ghost" type="submit" style={{ fontSize: ".8rem" }}>Veto &amp; retract</button></form>
+                        <form action={rollbackPublish} className="inline"><input type="hidden" name="company_id" value={h.id} /><input type="hidden" name="snapshot_id" value={latest.snapshot_id} /><button className="ghost" type="submit" style={{ fontSize: ".8rem" }}>Pull content</button></form>
+                      </div>
+                    ) : null}
+                  </div>
                 ) : (
                   <details>
-                    <summary style={{ cursor: "pointer" }} className="muted">Approve thesis (human checkpoint)</summary>
+                    <summary style={{ cursor: "pointer" }} className="muted">Approve thesis (admin override — the desk auto-publishes on its own)</summary>
                     <form action={approveThesis} style={{ marginTop: ".6rem" }} className="grid">
                       <input type="hidden" name="company_id" value={h.id} /><input type="hidden" name="snapshot_id" value={latest.snapshot_id} />
                       <input name="one_liner" placeholder="(optional) edit one-liner" defaultValue="" />
                       <textarea name="note" placeholder="(optional) approval note" rows={2} />
-                      <div><button type="submit">Approve</button></div>
+                      <div><button type="submit">Approve &amp; publish</button></div>
                     </form>
                   </details>
                 )}
               </div>
             ) : null}
           </div>
+
+          <CompanyChat companyId={h.id} turns={chats} suggestedFocus={content.research?.verification?.missing_sources ?? []} />
 
           {/* Analyst desk — expert panel + adversarial verification + confidence */}
           {content.research ? (
@@ -189,7 +206,12 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                 ) : null}
               </div>
               {content.research.verification?.recommendation === "review" ? (
-                <p className="tag warn" style={{ display: "block", marginBottom: ".5rem" }}>⚠ Low confidence — flagged for human review before publishing.</p>
+                <p className="tag warn" style={{ display: "block", marginBottom: ".5rem" }}>⚠ Below the confidence bar — held for review rather than auto-published.</p>
+              ) : null}
+              {content.research.deepening && (content.research.deepening.rounds?.length ?? 0) > 1 ? (
+                <p className="faint" style={{ fontSize: ".72rem", marginBottom: ".5rem" }}>
+                  Deepened {(content.research.deepening.rounds?.length ?? 1) - 1} round(s) · {content.research.deepening.stopped_reason} · tiers {(content.research.deepening.tiers_used ?? []).join(", ")}
+                </p>
               ) : null}
               {content.research.panel?.map((p) => (
                 <div key={p.lens} style={{ padding: ".4rem 0", borderBottom: "1px solid var(--panel-2)" }}>

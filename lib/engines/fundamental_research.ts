@@ -14,17 +14,20 @@ import { randomUUID } from "node:crypto";
 import { query, withTransaction } from "../db/pool";
 import { SecAdapter, type CompanyFacts } from "../sources/sec";
 import { NasdaqEarningsAdapter, resolveNextEarningsDate, type NextDate } from "../sources/earnings";
-import type { PerplexityFinance } from "../sources/perplexity";
+import type { PerplexityFinance, PerplexityClient } from "../sources/perplexity";
 import {
   extractStatements, buildModel, diffModels, stats,
   metricYoYGrowths, netMarginLevels, priorYearBaseForNext, type FinancialModel, type SnapshotDiff,
 } from "../financials/model";
 import { simulateScenario, mulberry32, type ScenarioOutput } from "../financials/montecarlo";
-import { concentrationExcerpt, extractMdaSection } from "../financials/filing_text";
+import { concentrationExcerpt, extractMdaSection, keywordExcerpts } from "../financials/filing_text";
 import { FUNDAMENTALS_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
+import { DESK_CONFIG, type DeskConfig } from "../config/desk";
+import { llmSpendThisMonth } from "../llm/client";
 import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
 import type { FundamentalsAnalyst } from "./fundamentals_analyst";
-import { ClaudeResearchPanel, type ResearchPanel } from "./research";
+import { ClaudeResearchPanel, type ResearchPanel, type ResearchEnrich } from "./research";
+import type { AutoCommitInput, AutoCommitResult } from "./autocommit";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
 import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_interest";
@@ -201,6 +204,11 @@ export interface CoverageResult {
   areas_addressed: number;
   areas_resolved: number;
   areas_carried: number;
+  // Workstream C (auto-commit) — defaulted when no autoCommit is wired (e.g. in fundamentals tests).
+  committed: boolean;
+  published_status: string;
+  content_job_id: string | null;
+  deepen_rounds: number;
 }
 
 export async function runCoveragePass(opts: {
@@ -212,11 +220,15 @@ export async function runCoveragePass(opts: {
   panel?: ResearchPanel; // the analyst desk (multi-expert + synthesis + adversarial verify)
   newsAnalyzer?: NewsAnalyzer; // for read-through; omit to skip
   finance?: PerplexityFinance; // advisory consensus + analyst view; omit to skip
+  perplexity?: PerplexityClient; // Workstream C: targeted deepening enrich queries; omit to skip
   sec?: SecAdapter;
   config?: FundamentalsConfig;
+  deskConfig?: DeskConfig; // Workstream C: deepening policy; defaults to DESK_CONFIG
   trigger?: "filing" | "manual";
   asOf?: string;
   rng?: () => number; // injectable for deterministic Monte Carlo in tests
+  focusOverride?: string[]; // per-run research focus (chat "Deepen research now"); merged, not persisted
+  autoCommit?: (input: AutoCommitInput) => Promise<AutoCommitResult>; // Workstream C; omit to skip publish
 }): Promise<CoverageResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -268,14 +280,48 @@ export async function runCoveragePass(opts: {
   const openAreas = await loadOpenAreas(company.id);
   const evidence = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`);
 
-  // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification.
-  const panel = opts.panel ?? new ClaudeResearchPanel();
+  // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
+  // the Workstream-C deepening loop. When verification is short of the bar, `enrich` gap-fills on the
+  // WIRED sources only (a targeted re-read of this filing + targeted Perplexity/Fiscal.ai queries).
+  const deskConfig = opts.deskConfig ?? DESK_CONFIG;
+  const enrich: ResearchEnrich | undefined = (html || opts.perplexity)
+    ? async ({ missing, unverified }) => {
+        const parts: string[] = [];
+        const sources: string[] = [];
+        if (html) {
+          const kw = [...new Set(
+            [...unverified, ...missing].flatMap((s) => s.split(/[^a-zA-Z]+/)).filter((w) => w.length > 4).map((w) => w.toLowerCase()),
+          )].slice(0, 10);
+          const ex = keywordExcerpts(html, kw, Math.floor(deskConfig.enrichCharBudget / 2));
+          if (ex) { parts.push(`Targeted re-read of ${opts.formType ?? "the filing"}:\n${ex}`); sources.push("SEC EDGAR (deepening re-read)"); }
+        }
+        if (opts.perplexity) {
+          const topics = (missing.length ? missing : unverified).slice(0, deskConfig.enrichPerplexityBudget);
+          for (const topic of topics) {
+            const a = await opts.perplexity.askText({
+              question: `For ${company.legal_name} (${company.primary_ticker}), give specific, sourced facts on: ${topic}. Cite figures and dates; be concise.`,
+              maxTokens: 500, purpose: "research.deepen.enrich",
+            }).catch(() => null);
+            if (a?.ok && a.text) { parts.push(`On "${topic}" (Perplexity/Fiscal.ai): ${a.text}`); sources.push(`Perplexity: ${topic}`); }
+          }
+        }
+        return parts.length ? { appended: parts.join("\n\n"), sources } : null;
+      }
+    : undefined;
+
+  const researchFocus = [...new Set([...(company.coverage?.research_focus ?? []), ...(opts.focusOverride ?? [])])];
+  // Per-asset deepen budget: stop escalating once THIS run has spent deepenBudgetUsd (measured as the
+  // ledger delta since the pass began). Round 0 always runs; only the deepening rounds are gated.
+  const spendAtStart = await llmSpendThisMonth();
+  const panel = opts.panel ?? new ClaudeResearchPanel({ config: deskConfig });
   const research = await panel.runResearch({
     company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector, listing: company.listing },
     evidence,
     rolling_outlook: cf.rolling_outlook,
     forward_expectations: cf.forward?.expectations ?? null,
-    research_focus: company.coverage?.research_focus,
+    research_focus: researchFocus.length ? researchFocus : undefined,
+    enrich,
+    withinBudget: async () => (await llmSpendThisMonth()) - spendAtStart < deskConfig.deepenBudgetUsd,
   });
   const synth = research.thesis;
 
@@ -322,6 +368,7 @@ export async function runCoveragePass(opts: {
     const researchBlock = {
       panel: research.panel,
       verification: research.verification,
+      deepening: research.deepening ?? null, // Workstream C escalation trace (for the report UI + chat)
       provenance: [{ claim_id: "research", source_ref: sourceId }],
     };
 
@@ -383,8 +430,7 @@ export async function runCoveragePass(opts: {
   }
 
   // 7. Adjudicate the open areas of interest: the desk resolves the ones this filing puts to bed
-  // (invalidated / confirmed / overreaction) and carries the rest to next quarter. Only the AOI
-  // status auto-resolves here — the thesis snapshot itself still awaits the §8 human checkpoint.
+  // (invalidated / confirmed / overreaction) and carries the rest to next quarter.
   let areasResolved = 0;
   let areasCarried = 0;
   if (openAreas.length && panel.adjudicateAreas) {
@@ -403,6 +449,29 @@ export async function runCoveragePass(opts: {
     }
   }
 
+  // 8. Auto-commit (Workstream C): the desk publishes what cleared the bar and enqueues the content
+  // spider. Runs AFTER the snapshot tx has committed, so it never holds that tx open across enqueue.
+  // Omitted (e.g. in fundamentals tests) → the asset is left as-is and the result carries defaults.
+  const dp = research.deepening;
+  const cleared = dp ? dp.cleared : research.verification.recommendation !== "review";
+  let committed = false;
+  let publishedStatus = "in_research";
+  let contentJobId: string | null = null;
+  if (opts.autoCommit) {
+    const ac = await opts.autoCommit({
+      companyId: company.id, snapshotId, config: deskConfig,
+      deepen: {
+        cleared,
+        publishedBelowBar: dp ? dp.published_below_bar : false,
+        finalConfidence: research.verification.confidence,
+        rounds: dp ? dp.rounds.length : 1,
+        stoppedReason: dp ? dp.stopped_reason : (cleared ? "cleared" : "review"),
+        noteLines: [synth.one_liner],
+      },
+    }).catch((e) => { console.warn(`[coverage] auto-commit failed: ${(e as Error).message}`); return null; });
+    if (ac) { committed = ac.committed; publishedStatus = ac.status; contentJobId = ac.jobId; }
+  }
+
   return {
     company_id: company.id, snapshot_id: snapshotId, as_of: asOf, cycle_label: cycleLabel,
     conviction: synth.conviction, metrics_extracted: Object.keys(line_items).length,
@@ -411,6 +480,8 @@ export async function runCoveragePass(opts: {
     confidence: research.verification.confidence,
     needs_review: research.verification.recommendation === "review",
     areas_addressed: openAreas.length, areas_resolved: areasResolved, areas_carried: areasCarried,
+    committed, published_status: publishedStatus, content_job_id: contentJobId,
+    deepen_rounds: dp ? dp.rounds.length : 0,
   };
 }
 

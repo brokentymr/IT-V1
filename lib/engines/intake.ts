@@ -123,7 +123,7 @@ export async function createUnlistedCompany(e: { name: string; sector: string | 
 }
 
 /** Auto-on-add: enqueue the onboarding job that runs the whole pipeline to build clarity (level-up B). */
-const enqueueOnboard = (companyId: string, queue: Queue): Promise<string | null> => queue.enqueue(JOB.ONBOARD_ASSET, { company_id: companyId });
+const enqueueOnboard = (companyId: string, queue: Queue): Promise<string | null> => queue.enqueue(JOB.ONBOARD_ASSET, { company_id: companyId }, { singletonKey: `onboard:${companyId}` });
 
 /** Persist the operator's research-focus directives onto the company (read by the engines). */
 async function storeFocus(companyId: string, focus?: string[]): Promise<void> {

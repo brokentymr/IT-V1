@@ -98,7 +98,7 @@ export interface CompanyDetail {
   latest: SnapshotRow | null;
   sentiment: BrandSentiment | null;
   snapshots: Array<{ snapshot_id: string; as_of: string; cycle_label: string; conviction: number | null }>;
-  approval: { approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null } | null;
+  approval: { approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null; status: string } | null;
   relationships: RelationshipRow[];
   feed: FeedNote[];
   signals: Array<{ ts: string; kind: string; payload: Record<string, unknown> }>;
@@ -139,8 +139,8 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
   const latest = snaps.rows[0] ?? null;
 
   const approval = latest
-    ? (await query<{ approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null }>(
-        "SELECT to_char(approved_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS approved_at, approved_by, edited_thesis, note FROM thesis_approvals WHERE snapshot_id = $1",
+    ? (await query<{ approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null; status: string }>(
+        "SELECT to_char(approved_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS approved_at, approved_by, edited_thesis, note, status FROM thesis_approvals WHERE snapshot_id = $1",
         [latest.snapshot_id],
       )).rows[0] ?? null
     : null;

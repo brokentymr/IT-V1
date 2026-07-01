@@ -9,8 +9,11 @@
  * adversarial verification. Injectable so the engines stay deterministic in tests.
  */
 import { z } from "zod";
-import { completeJSON } from "../llm/client";
+import { completeJSON, CostCeilingError } from "../llm/client";
 import { RESOLUTION_VERDICTS } from "./areas_of_interest";
+import { deepenToConfidence, type DeepenSteps, type DeepeningTrace } from "./deepen";
+import { ClaudeDeskManager } from "./desk_manager";
+import { DESK_CONFIG, type DeskConfig } from "../config/desk";
 
 const LENS = z.enum(["equity", "sector", "technology", "risk"]);
 
@@ -46,18 +49,26 @@ export const VerificationResult = z.object({
 });
 export type VerificationResult = z.infer<typeof VerificationResult>;
 
+/** Source-gap fill on the wired sources, supplied by the caller (coverage wires EDGAR + Perplexity).
+ *  Absent in tests/onboarding, in which case the deepening loop re-lenses/bumps tier without new evidence. */
+export type ResearchEnrich = (input: { missing: string[]; unverified: string[] }) => Promise<{ appended: string; sources: string[] } | null>;
+
 export interface ResearchContext {
   company: { legal_name: string; ticker: string | null; gics_sector: string | null; listing: string };
   evidence: string; // assembled by the caller: figures, drivers, scenario, consensus, profile, news
   rolling_outlook?: string;
   forward_expectations?: string | null;
   research_focus?: string[];
+  enrich?: ResearchEnrich;
+  /** Per-asset budget gate checked between deepening rounds (coverage wires it to the LLM ledger). */
+  withinBudget?: () => Promise<boolean>;
 }
 
 export interface ResearchResult {
   panel: ExpertContribution[];
   thesis: ThesisSynthesis;
   verification: VerificationResult;
+  deepening?: DeepeningTrace; // Workstream C: the escalation trace (absent when the injected fake panel is used)
 }
 
 export const AreaResolution = z.object({
@@ -119,22 +130,40 @@ ${ctx.evidence}`;
 }
 
 export class ClaudeResearchPanel implements ResearchPanel {
+  constructor(private readonly opts: { config?: DeskConfig } = {}) {}
+  private get cfg(): DeskConfig { return this.opts.config ?? DESK_CONFIG; }
+
   async runResearch(ctx: ResearchContext): Promise<ResearchResult> {
-    const block = contextBlock(ctx);
+    // The desk is now a deepening loop (Workstream C): round 0 is the historical single pass
+    // (Sonnet lenses -> Opus synthesis -> Opus adversarial verify); if it's short of the bar the
+    // orchestrator escalates on the wired sources. All side-effects are injected as steps.
+    const steps: DeepenSteps = {
+      runPanel: (evidence, tier, focus) => this.runLensPanel(evidence, tier, focus ?? ctx.research_focus),
+      synthesize: (panel, evidence) => this.synthesize(panel, evidence, ctx.research_focus),
+      verify: (thesis, panel, evidence) => this.verify(thesis, panel, evidence),
+      ...(ctx.enrich ? { enrich: (i) => ctx.enrich!(i) } : {}),
+      ...(ctx.withinBudget ? { withinBudget: ctx.withinBudget } : {}),
+      ...(this.cfg.managerEnabled ? { manager: new ClaudeDeskManager(this.cfg.managerModel) } : {}),
+    };
+    const { panel, thesis, verification, trace } = await deepenToConfidence(steps, this.cfg, {
+      company: { legal_name: ctx.company.legal_name, ticker: ctx.company.ticker },
+      evidence: contextBlock(ctx), focus: ctx.research_focus,
+    });
+    return { panel, thesis, verification, deepening: trace };
+  }
 
-    // 1. Expert lenses — parallel, Sonnet.
-    const panel = (await Promise.all(
+  /** The parallel expert lenses at a given model tier. A CostCeilingError fails the panel fast
+   *  (rethrown) so the deepening loop can stop cleanly rather than silently degrading and still
+   *  billing the two Opus calls; any other lens failure degrades to a dropped lens. */
+  private runLensPanel(block: string, tier: string, focus?: string[]): Promise<ExpertContribution[]> {
+    return Promise.all(
       (Object.keys(LENSES) as Array<z.infer<typeof LENS>>).map((lens) =>
-        this.runLens(lens, block, ctx.research_focus).catch((e) => { console.warn(`[research] lens ${lens} failed: ${(e as Error).message}`); return null; })),
-    )).filter((x): x is ExpertContribution => x !== null);
-
-    // 2. Synthesis — Opus head-of-research.
-    const thesis = await this.synthesize(panel, block, ctx.research_focus);
-
-    // 3. Adversarial verification — Opus skeptic.
-    const verification = await this.verify(thesis, panel, block);
-
-    return { panel, thesis, verification };
+        this.runLens(lens, block, tier, focus).catch((e) => {
+          if (e instanceof CostCeilingError) throw e;
+          console.warn(`[research] lens ${lens} failed: ${(e as Error).message}`);
+          return null;
+        })),
+    ).then((xs) => xs.filter((x): x is ExpertContribution => x !== null));
   }
 
   async adjudicateAreas(input: AdjudicateInput): Promise<AreaAdjudication> {
@@ -168,7 +197,7 @@ Return JSON: {"resolutions": [{"theme": string, "verdict": "invalidated|confirme
     return completeJSON({ prompt, schema: AreaAdjudication, model: "claude-sonnet-4-6", purpose: "research.adjudicate_areas", maxTokens: 1500 });
   }
 
-  private runLens(lens: z.infer<typeof LENS>, block: string, focus?: string[]): Promise<ExpertContribution> {
+  private runLens(lens: z.infer<typeof LENS>, block: string, tier: string, focus?: string[]): Promise<ExpertContribution> {
     const { persona, brief } = LENSES[lens];
     const prompt = `You are ${persona}. ${brief}${focusNote(focus)}
 
@@ -179,7 +208,7 @@ Return your contribution as JSON — be specific, do not pad. Keep summary to 2-
 {"lens": "${lens}", "summary": string, "key_points": [string],
  "claims": [{"statement": string, "basis": string, "confidence": number}],
  "risks": [string], "confidence": number}`;
-    return completeJSON({ prompt, schema: ExpertContribution, model: "claude-sonnet-4-6", purpose: `research.lens.${lens}`, maxTokens: 1800 });
+    return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 1800 });
   }
 
   private synthesize(panel: ExpertContribution[], block: string, focus?: string[]): Promise<ThesisSynthesis> {
@@ -194,7 +223,7 @@ ${panelText}
 Return JSON:
 {"one_liner": string, "long_form": string, "actual_vs_expected": string, "tensions": [string],
  "invalidation_triggers": [string], "conviction": int 1-5, "claims_to_verify": [string]}`;
-    return completeJSON({ prompt, schema: ThesisSynthesis, model: "claude-opus-4-8", purpose: "research.synthesis", maxTokens: 2600 });
+    return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 2600 });
   }
 
   private verify(thesis: ThesisSynthesis, panel: ExpertContribution[], block: string): Promise<VerificationResult> {
@@ -211,6 +240,6 @@ ${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 Return JSON:
 {"verdicts": [{"claim": string, "status": "supported|unverified|contradicted", "note": string}],
  "confidence": number, "missing_sources": [string], "recommendation": "auto|review"}`;
-    return completeJSON({ prompt, schema: VerificationResult, model: "claude-opus-4-8", purpose: "research.verify", maxTokens: 3000 });
+    return completeJSON({ prompt, schema: VerificationResult, model: this.cfg.verifyModel, purpose: "research.verify", maxTokens: 3000 });
   }
 }

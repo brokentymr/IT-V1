@@ -71,7 +71,7 @@ export async function runFilingPoll(opts: {
       result.new_filings++;
 
       const jobId = await queue
-        .enqueue(JOB.COVERAGE_PASS, { company_id: company.id, accession: f.accession, form_type: f.form, filing_url: f.url })
+        .enqueue(JOB.COVERAGE_PASS, { company_id: company.id, accession: f.accession, form_type: f.form, filing_url: f.url }, { singletonKey: `coverage:${company.id}:${f.accession}` })
         .catch((e) => { console.warn(`[poll] enqueue failed for ${f.accession}: ${(e as Error).message}`); return null; });
       if (jobId) result.enqueued++;
     }

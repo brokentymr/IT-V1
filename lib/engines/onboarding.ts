@@ -1,6 +1,7 @@
 /**
- * Auto-on-add onboarding (level-up B). When an asset is added we run the whole pipeline to "build
- * clarity" automatically, then stop at the §8 human checkpoint (approval → content). A listed name gets
+ * Auto-on-add onboarding (level-up B + Workstream C). When an asset is added we run the whole pipeline
+ * to "build clarity" automatically; the coverage step's auto-commit publishes it when the desk clears
+ * the confidence bar (else it rests at "Ready for your review"). A listed name gets
  * coverage → monitor → sentiment → price; an unlisted name gets a research profile. Each step degrades
  * independently (a dead adapter fails one step, not the run) and is recorded so the consumer surface can
  * show a live progress strip. Runners are injectable so the orchestration is deterministic in tests.
@@ -64,8 +65,9 @@ export async function runOnboarding(opts: { companyId: string; runners: OnboardR
     await skip("fundamentals", "no SEC filings — unlisted");
   }
 
-  // Ready for your review — the research is built; the §8 checkpoint (approval) is next.
-  await query("UPDATE companies SET coverage_status = 'in_review', coverage = jsonb_set(coverage,'{status}','\"in_review\"') WHERE id = $1", [opts.companyId]);
+  // Terminal status. The coverage step's auto-commit (Workstream C) may have already published this
+  // asset; only advance to 'in_review' if it's still building — never clobber a published status.
+  await query("UPDATE companies SET coverage_status = 'in_review', coverage = jsonb_set(coverage,'{status}','\"in_review\"') WHERE id = $1 AND coverage_status = 'in_research'", [opts.companyId]);
   const status: "done" | "failed" = steps.some((s) => s.status === "failed") && !steps.some((s) => s.status === "ok") ? "failed" : "done";
   await query("UPDATE onboarding_runs SET status = $2, finished_at = now(), steps = $3 WHERE id = $1", [runId, status, JSON.stringify(steps)]);
 

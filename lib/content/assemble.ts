@@ -37,9 +37,11 @@ interface SnapContent {
   research?: { provenance?: Array<{ source_ref: string }> };
 }
 
-/** Assemble the approved substance for a company. Throws NotApprovedError if the latest snapshot
- *  hasn't cleared the human checkpoint. */
-export async function assembleSubstance(companyId: string): Promise<Substance> {
+/** Assemble the approved substance for a company. Throws NotApprovedError if the target snapshot
+ *  has no active ('approved') approval row. When `snapshotId` is given the content is pinned to that
+ *  exact snapshot (the auto-commit path pins the snapshot that cleared the bar, avoiding a race with a
+ *  newer unapproved snapshot); omitted, it resolves the latest (the manual UI path). */
+export async function assembleSubstance(companyId: string, snapshotId?: string): Promise<Substance> {
   const c = await query<{ id: string; legal_name: string; primary_ticker: string | null; gics_sector: string | null; listing: string; positions_held: unknown[]; current_events: { rolling_outlook?: string; brand_sentiment?: Record<string, unknown> } }>(
     `SELECT c.id, c.legal_name, c.primary_ticker, c.gics_sector, c.listing,
             COALESCE(c.coverage->'positions_held','[]') AS positions_held,
@@ -50,16 +52,22 @@ export async function assembleSubstance(companyId: string): Promise<Substance> {
   if (!c.rows[0]) throw new Error(`company ${companyId} not found`);
   const co = c.rows[0];
 
-  const s = await query<{ snapshot_id: string; as_of: string; cycle_label: string; content: SnapContent }>(
-    `SELECT snapshot_id, to_char(as_of,'YYYY-MM-DD') AS as_of, cycle_label, content
-       FROM canonical_snapshots WHERE company_id = $1 ORDER BY as_of DESC, created_at DESC LIMIT 1`,
-    [companyId],
-  );
+  const s = snapshotId
+    ? await query<{ snapshot_id: string; as_of: string; cycle_label: string; content: SnapContent }>(
+        `SELECT snapshot_id, to_char(as_of,'YYYY-MM-DD') AS as_of, cycle_label, content
+           FROM canonical_snapshots WHERE company_id = $1 AND snapshot_id = $2`,
+        [companyId, snapshotId],
+      )
+    : await query<{ snapshot_id: string; as_of: string; cycle_label: string; content: SnapContent }>(
+        `SELECT snapshot_id, to_char(as_of,'YYYY-MM-DD') AS as_of, cycle_label, content
+           FROM canonical_snapshots WHERE company_id = $1 ORDER BY as_of DESC, created_at DESC LIMIT 1`,
+        [companyId],
+      );
   const snap = s.rows[0];
   if (!snap) throw new NotApprovedError(co.primary_ticker ?? co.legal_name);
 
   const appr = await query<{ approved_at: string; edited_thesis: { one_liner?: string | null; long_form?: string | null } | null }>(
-    "SELECT to_char(approved_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS approved_at, edited_thesis FROM thesis_approvals WHERE snapshot_id = $1",
+    "SELECT to_char(approved_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS approved_at, edited_thesis FROM thesis_approvals WHERE snapshot_id = $1 AND status = 'approved'",
     [snap.snapshot_id],
   );
   if (!appr.rows[0]) throw new NotApprovedError(co.primary_ticker ?? co.legal_name);

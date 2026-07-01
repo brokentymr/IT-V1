@@ -12,11 +12,13 @@ import { runPriceMonitor } from "../engines/price_monitor";
 import { runPrivateProfile } from "../engines/private_profile";
 import { ClaudeFundamentalsAnalyst } from "../engines/fundamentals_analyst";
 import { ClaudeNewsAnalyzer } from "../engines/analyzer";
-import { PerplexityFinance } from "../sources/perplexity";
+import { PerplexityFinance, PerplexityClient } from "../sources/perplexity";
 import { PriceAdapter } from "../sources/prices";
 import { ClaudePriceAttributor } from "../engines/price_attribution";
 import { SecAdapter } from "../sources/sec";
 import { FUNDAMENTALS_CONFIG } from "../config/fundamentals";
+import { DESK_CONFIG } from "../config/desk";
+import { autoCommit as runAutoCommit } from "../engines/autocommit";
 
 export interface OnboardJobData { company_id: string }
 
@@ -30,11 +32,30 @@ export function liveRunners(): OnboardRunners {
       const f = await sec.recentFilings(cik, { forms: FUNDAMENTALS_CONFIG.triggerForms });
       const latest = f.data?.find((x) => /^10-[KQ]$/.test(x.form)) ?? f.data?.[0];
       if (!latest) throw new Error("no covered filing");
-      const r: CoverageResult = await runCoveragePass({
-        companyId, accession: latest.accession, formType: latest.form, filingUrl: latest.url,
-        analyst: new ClaudeFundamentalsAnalyst(), newsAnalyzer: new ClaudeNewsAnalyzer(), finance: new PerplexityFinance(), sec, trigger: "manual",
-      });
-      return `${latest.form} ${latest.accession} · conviction ${r.conviction}/5 · confidence ${(r.confidence * 100).toFixed(0)}%`;
+      // Claim the accession the same way the daily poll / webhook does, so onboard's inline coverage
+      // and the poll can't both cover (and both auto-publish) the same filing. If already claimed, the
+      // COVERAGE_PASS job for it will run the coverage — skip the inline pass.
+      const claim = await query<{ id: string }>(
+        `INSERT INTO webhook_deliveries (source, idempotency_key, company_id, payload)
+         VALUES ('filing', $1, $2, $3) ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING id`,
+        [latest.accession, companyId, { form_type: latest.form, filing_url: latest.url, via: "onboard" }],
+      );
+      if (claim.rowCount === 0) return `${latest.form} ${latest.accession} · already claimed by the filing pipeline — coverage runs there`;
+      let r: CoverageResult;
+      try {
+        r = await runCoveragePass({
+          companyId, accession: latest.accession, formType: latest.form, filingUrl: latest.url,
+          analyst: new ClaudeFundamentalsAnalyst(), newsAnalyzer: new ClaudeNewsAnalyzer(),
+          finance: new PerplexityFinance(), perplexity: new PerplexityClient(), sec,
+          deskConfig: DESK_CONFIG, trigger: "manual", autoCommit: (input) => runAutoCommit(input),
+        });
+      } catch (e) {
+        // Release the claim so the daily poll / webhook can re-drive this accession — otherwise a
+        // transient failure here would strand the filing uncovered forever.
+        await query("DELETE FROM webhook_deliveries WHERE source='filing' AND idempotency_key=$1 AND (payload->>'via')='onboard'", [latest.accession]).catch(() => {});
+        throw e;
+      }
+      return `${latest.form} ${latest.accession} · conviction ${r.conviction}/5 · confidence ${(r.confidence * 100).toFixed(0)}% · ${r.committed ? r.published_status : "in_review"}${r.deepen_rounds > 1 ? ` · ${r.deepen_rounds} rounds` : ""}`;
     },
     async monitor(companyId) {
       const r = await runDailyMonitor({ analyzer: new ClaudeNewsAnalyzer(), companyIds: [companyId] });

@@ -15,8 +15,8 @@ import { buildEpisode, type PodcastScript, type EpisodeBuilder } from "../engine
 
 export interface SpiderResult { deckId: string; newsletterId: string; shortformId: string; deck: Deck; newsletter: Newsletter; shortform: ShortFormPack }
 
-export async function generateSpider(companyId: string, deps: { deck?: DeckBuilder; newsletter?: NewsletterBuilder; shortform?: ShortFormBuilder } = {}): Promise<SpiderResult> {
-  const substance = await assembleSubstance(companyId); // throws NotApprovedError if the §8 checkpoint isn't cleared
+export async function generateSpider(companyId: string, deps: { deck?: DeckBuilder; newsletter?: NewsletterBuilder; shortform?: ShortFormBuilder } = {}, snapshotId?: string): Promise<SpiderResult> {
+  const substance = await assembleSubstance(companyId, snapshotId); // throws NotApprovedError if the target snapshot isn't approved
   const disclosure = disclosureFooter(substance);
   const prov = substance.provenance;
 
