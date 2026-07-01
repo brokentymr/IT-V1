@@ -4,6 +4,7 @@ import { loadCompanyChats } from "../../../lib/engines/company_chat";
 import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, vetoThesis, rollbackPublish, addLink, setLinkStatus, deleteLink } from "../../actions";
 import { generateContentAction } from "../../content-actions";
 import CompanyChat from "./CompanyChat";
+import DeleteCompany from "../../DeleteCompany";
 
 export const dynamic = "force-dynamic";
 
@@ -81,7 +82,10 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
               <button className="ghost" type="submit">{h.content_enrolled ? "✓ In content pipeline" : "+ Add to content pipeline"}</button>
             </form>
           </div>
-          <a href="/jobs" className="faint">watch pipeline →</a>
+          <div className="row" style={{ gap: ".8rem" }}>
+            <DeleteCompany id={h.id} name={h.primary_ticker ?? h.legal_name} />
+            <a href="/jobs" className="faint">watch pipeline →</a>
+          </div>
         </div>
       </div>
 

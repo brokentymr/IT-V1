@@ -9,7 +9,7 @@ import { redirect } from "next/navigation";
 import { query } from "../lib/db/pool";
 import { ingestCompany } from "../lib/engines/ingestion";
 import { SecAdapter } from "../lib/sources/sec";
-import { bossQueue } from "../lib/queue/boss";
+import { bossQueue, cancelCompanyJobs } from "../lib/queue/boss";
 import { JOB } from "../lib/queue/types";
 import { FUNDAMENTALS_CONFIG } from "../lib/config/fundamentals";
 import { CostCeilingError } from "../lib/llm/client";
@@ -23,6 +23,22 @@ export async function addCompany(formData: FormData): Promise<void> {
   await bossQueue.enqueue(JOB.ONBOARD_ASSET, { company_id: res.company_id }, { singletonKey: `onboard:${res.company_id}` }).catch(() => null);
   revalidatePath("/universe");
   redirect(`/company/${res.company_id}`);
+}
+
+/** Delete a company entirely: stop any in-flight/queued processing, then remove it. Every dependent
+ *  table (snapshots, filings, content, onboarding runs, approvals, chats, areas, relationships,
+ *  embeddings…) is ON DELETE CASCADE, so one delete cleans the whole record. Irreversible — the UI
+ *  button confirms first. */
+export async function deleteCompany(formData: FormData): Promise<void> {
+  const companyId = String(formData.get("company_id") ?? "");
+  if (!companyId) return;
+  // 1. Cancel pending/active queue jobs so nothing keeps processing a company we're about to delete.
+  await cancelCompanyJobs(companyId).catch(() => 0);
+  // 2. Remove the company; ON DELETE CASCADE removes all dependent rows.
+  await query("DELETE FROM companies WHERE id = $1", [companyId]);
+  revalidatePath("/universe");
+  revalidatePath("/");
+  redirect("/universe");
 }
 
 /** Resolve the latest covered filing from EDGAR and enqueue a coverage pass for it. */

@@ -1,5 +1,6 @@
 import PgBoss from "pg-boss";
 import { JOB, type JobName, type Queue } from "./types";
+import { query } from "../db/pool";
 
 // Self-hosted pg-boss queue on the app Postgres (spec §7.1). Singleton; queues are
 // created on first start.
@@ -40,6 +41,24 @@ export async function stopBoss(): Promise<void> {
     boss = undefined;
     starting = undefined;
   }
+}
+
+/** Stop all queued/active work for a company. The app tables cascade-delete with the company row,
+ *  but pg-boss keeps its own schema (no FK to companies), so a pending onboard/coverage/content job
+ *  would otherwise keep running against a ghost. We delete every per-company job (matched on the
+ *  `company_id` payload) that hasn't already finished. Returns how many jobs were dropped. Deleting an
+ *  'active' job is safe: pg-boss ignores the completion of a row it can no longer find, and the handler
+ *  itself fails cleanly when its next write hits the now-deleted company. */
+export async function cancelCompanyJobs(companyId: string): Promise<number> {
+  const names = Object.values(JOB) as string[];
+  const res = await query(
+    `DELETE FROM pgboss.job
+      WHERE name = ANY($1::text[])
+        AND data->>'company_id' = $2
+        AND state IN ('created', 'retry', 'active')`,
+    [names, companyId],
+  );
+  return res.rowCount ?? 0;
 }
 
 /** The production Queue, backed by pg-boss. */

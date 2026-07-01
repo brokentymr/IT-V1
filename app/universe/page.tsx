@@ -1,5 +1,6 @@
 import { listUniverse, universeFacets } from "../../lib/views/universe";
 import AddAsset from "./AddAsset";
+import DeleteCompany from "../DeleteCompany";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,7 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
           </form>
 
           <table>
-            <thead><tr><th>Asset</th><th>Sector</th><th>Status</th><th>Conviction</th><th>Thesis</th></tr></thead>
+            <thead><tr><th>Asset</th><th>Sector</th><th>Status</th><th>Conviction</th><th>Thesis</th><th /></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id}>
@@ -54,9 +55,10 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
                   </td>
                   <td className="mono">{r.conviction ? `${r.conviction}/5` : "—"}</td>
                   <td className="muted" style={{ maxWidth: 280 }}>{r.one_liner ?? <span className="faint">no snapshot yet</span>}</td>
+                  <td><DeleteCompany id={r.id} name={r.primary_ticker ?? r.legal_name} variant="row" /></td>
                 </tr>
               ))}
-              {rows.length === 0 && <tr><td colSpan={5} className="faint">No assets match.</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={6} className="faint">No assets match.</td></tr>}
             </tbody>
           </table>
         </div>
