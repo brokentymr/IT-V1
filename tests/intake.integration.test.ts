@@ -23,6 +23,17 @@ const preIpoFetcher: JsonFetcher = async (url) => {
   if (url.includes("CIK0001999999")) return { status: 200, body: { name: "NewCo Inc.", sic: "7372", sicDescription: "Prepackaged Software", tickers: [], exchanges: [], fiscalYearEnd: "1231" } };
   return { status: 404, body: null };
 };
+// A SEC ticker index where a foreign/private name's LLM-guessed ticker collides with an UNRELATED US
+// filer (the Aritzia→wrong-company bug): "ATZ" belongs to "Aterian Inc", not Aritzia; no S-1 either.
+const collisionFetcher: JsonFetcher = async (url) => {
+  if (url.includes("company_tickers.json")) return { status: 200, body: {
+    "0": { cik_str: 12345, ticker: "ATZ", title: "ATERIAN INC" },
+    "1": { cik_str: 320193, ticker: "AAPL", title: "Apple Inc." },
+  } };
+  if (url.includes("efts.sec.gov")) return { status: 200, body: { hits: { hits: [] } } };
+  return { status: 404, body: null };
+};
+
 const PROFILE_JSON = JSON.stringify({
   profile: { description: "Rocket and satellite company.", founded: "2002", headquarters: "Hawthorne, CA", total_funding: "$10B+", last_valuation: "$350B", key_investors: ["Founders Fund"], competitors: ["Rocket Lab"], recent: "Starship tests." },
   thesis: { one_liner: "Dominant launch provider.", long_form: "Long.", opportunities: ["Starlink"], risks: ["Execution"], conviction: 4 },
@@ -79,7 +90,7 @@ describe("agentic intake (integration)", () => {
   it("adds a LISTED entity via SEC ingest", async () => {
     const queue = new FakeQueue();
     const out = await addResolvedEntity(
-      { name: "Apple Inc.", ticker: "AAPL", listing: "listed", exchange: "NASDAQ", sector: "IT", rationale: "x" },
+      { name: "Apple Inc.", ticker: "AAPL", listing: "listed", exchange: "NASDAQ", sector: "IT", rationale: "x", verified: true, cik: "0000320193" },
       { sec: fixtureSec(), queue, autoRun: true, research_focus: ["device price increases"] },
     );
     expect(out.result).toBe("ingested");
@@ -107,6 +118,30 @@ describe("agentic intake (integration)", () => {
     const again = await createUnlistedCompany({ name: "SpaceX", sector: "Industrials", listing: "private" });
     expect(again.status).toBe("exists");
     expect(again.company_id).toBe(out.company_id);
+  });
+
+  it("does NOT substitute a stranger: a name whose LLM ticker collides with an unrelated filer stays unverified", async () => {
+    // Aritzia (TSX-listed) with an LLM-guessed "ATZ" that resolves to the unrelated US filer "Aterian".
+    const corrected = await verifyEntity(
+      { name: "Aritzia", ticker: "ATZ", listing: "listed", exchange: "TSX", sector: "Consumer Discretionary", rationale: "named brand" },
+      new SecAdapter(collisionFetcher),
+    );
+    expect(corrected.verified).toBe(false);            // name disagreement → NOT confirmed as Aterian
+    expect(corrected.cik).toBeNull();
+  });
+
+  it("adds a colliding foreign/private name as ITSELF (tickerless), never the stranger", async () => {
+    const queue = new FakeQueue();
+    const out = await addResolvedEntity(
+      { name: "Aritzia", ticker: "ATZ", listing: "listed", exchange: "TSX", sector: "Consumer Discretionary", rationale: "x", verified: false, cik: null },
+      { sec: new SecAdapter(collisionFetcher), queue, autoRun: true },
+    );
+    expect(out.result).toBe("created");                // fell through to the profile path, as itself
+    const c = await db.pool.query("SELECT legal_name, primary_ticker, cik FROM companies WHERE id=$1", [out.company_id]);
+    expect(c.rows[0].legal_name).toBe("Aritzia");      // NOT "ATERIAN INC"
+    expect(c.rows[0].primary_ticker).toBeNull();
+    expect(c.rows[0].cik).toBeNull();
+    expect(queue.jobs.some((j) => j.name === "profile-pass")).toBe(true);
   });
 
   it("runs a Perplexity profile pass → a snapshot with a profile + thesis", async () => {

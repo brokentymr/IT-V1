@@ -12,6 +12,22 @@ import type { JsonFetcher, ProvenanceStamp, SourceResult, TextFetcher } from "./
 
 const ORIGIN = "SEC EDGAR";
 const TICKERS_URL = "https://www.sec.gov/files/company_tickers.json";
+
+/** Normalize a company name for matching: lowercase, strip punctuation + common corporate suffixes. */
+export function normalizeCompanyName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\b(inc|incorporated|corp|corporation|company|co|ltd|limited|llc|lp|plc|holdings?|group|systems?|technologies|technology|the)\b/g, " ")
+    .replace(/\s+/g, " ").trim();
+}
+
+/** Do two company names refer to the same entity? Exact normalized match or a clean prefix (so
+ *  "Alphabet" agrees with "Alphabet Inc." but "Aritzia" does NOT agree with an unrelated filer). */
+export function nameAgrees(a: string, b: string): boolean {
+  const x = normalizeCompanyName(a), y = normalizeCompanyName(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return x.startsWith(`${y} `) || y.startsWith(`${x} `);
+}
 const SUBMISSIONS_URL = (cik10: string) => `https://data.sec.gov/submissions/CIK${cik10}.json`;
 const COMPANYFACTS_URL = (cik10: string) => `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik10}.json`;
 const FTS_URL = (q: string, forms: string) =>
@@ -167,9 +183,7 @@ export class SecAdapter {
    */
   async resolveByName(name: string): Promise<SourceResult<{ cik: string; ticker: string; title: string }>> {
     const stamp: ProvenanceStamp = { origin: ORIGIN, url: TICKERS_URL, retrieved_at: new Date().toISOString() };
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ")
-      .replace(/\b(inc|incorporated|corp|corporation|company|co|ltd|limited|llc|lp|plc|holdings?|group|systems?|technologies|technology|the)\b/g, " ")
-      .replace(/\s+/g, " ").trim();
+    const norm = normalizeCompanyName;
     try {
       const index = await this.tickerIndex();
       if (!index) return { ok: false, data: null, missing: ["company_tickers.json unavailable"], provenance: stamp };

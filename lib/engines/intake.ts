@@ -8,7 +8,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { query } from "../db/pool";
 import { PerplexityClient } from "../sources/perplexity";
-import { SecAdapter } from "../sources/sec";
+import { SecAdapter, nameAgrees } from "../sources/sec";
 import { ingestCompany, ingestByCik } from "./ingestion";
 import { bossQueue } from "../queue/boss";
 import { JOB, type Queue } from "../queue/types";
@@ -42,7 +42,12 @@ export type ResolveResult = z.infer<typeof ResolveResult>;
 export async function verifyEntity(e: ResolvedEntity, sec: SecAdapter): Promise<ResolvedEntity> {
   if (e.ticker) {
     const r = await sec.resolveTicker(e.ticker);
-    if (r.ok && r.data) return { ...e, ticker: r.data.ticker, listing: "listed", cik: r.data.cik, verified: true, verification: `ticker ${r.data.ticker} confirmed in SEC index` };
+    // The symbol must resolve to a filer whose NAME agrees with the requested company — otherwise an
+    // LLM-guessed ticker for a foreign/private name (Aritzia, Reformation) would "confirm" against an
+    // unrelated US filer and that stranger would be ingested in its place. Name disagreement → fall through.
+    if (r.ok && r.data && nameAgrees(e.name, r.data.title)) {
+      return { ...e, ticker: r.data.ticker, listing: "listed", cik: r.data.cik, verified: true, verification: `ticker ${r.data.ticker} confirmed in SEC index (${r.data.title})` };
+    }
   }
   const byName = await sec.resolveByName(e.name);
   if (byName.ok && byName.data) {
@@ -156,8 +161,10 @@ export async function addResolvedEntity(
   const queue = opts.queue ?? bossQueue;
   const autoRun = opts.autoRun ?? true;
 
-  // Listed → ingest by ticker, run coverage.
-  if (e.listing === "listed" && e.ticker) {
+  // Listed → ingest by ticker, run coverage. ONLY when EDGAR-verified (verifyEntity confirmed the
+  // ticker resolves to a name-agreeing filer) — an unverified "listed" claim (e.g. a foreign exchange)
+  // must NOT ingest by the LLM's raw ticker guess; it falls through to the profile path as itself.
+  if (e.listing === "listed" && e.verified && e.ticker) {
     try {
       const res = await ingestCompany(e.ticker, { sec });
       await storeFocus(res.company_id, opts.research_focus);
