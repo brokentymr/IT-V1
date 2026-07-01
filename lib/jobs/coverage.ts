@@ -10,6 +10,7 @@ import { ClaudeNewsAnalyzer } from "../engines/analyzer";
 import { PerplexityFinance, PerplexityClient } from "../sources/perplexity";
 import { DESK_CONFIG } from "../config/desk";
 import { autoCommit as runAutoCommit } from "../engines/autocommit";
+import { ClaudePositioningDesk } from "../engines/positioning";
 
 export interface CoverageJobData {
   company_id: string;
@@ -33,5 +34,6 @@ export async function handleCoveragePass(data: CoverageJobData): Promise<Coverag
     focusOverride: data.focus_override,
     trigger: "filing",
     autoCommit: (input) => runAutoCommit(input),
+    positioningDesk: new ClaudePositioningDesk(),
   });
 }

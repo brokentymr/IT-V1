@@ -14,6 +14,9 @@ const fmtB = (n?: number | null) =>
   n == null ? "—" : Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : Math.abs(n) >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : `$${n.toFixed(0)}`;
 const pctf = (n?: number | null) => (n == null ? "—" : `${(n * 100).toFixed(1)}%`);
 const dirTag = (d: string) => (d === "up" ? "good" : d === "down" ? "bad" : "");
+const STANCE_LABEL: Record<string, string> = { strong_long: "Strong Long", constructive: "Constructive", neutral: "Neutral", cautious: "Cautious", avoid: "Avoid" };
+const stanceTone = (s: string) => (s === "strong_long" || s === "constructive" ? "good" : s === "avoid" || s === "cautious" ? "bad" : "");
+const dirWord = (d?: string) => (d === "positive" ? "▲" : d === "negative" ? "▼" : d === "mixed" ? "◆" : "•");
 
 interface Band { p10: number; p50: number; p90: number }
 interface Profile { description?: string; founded?: string | null; headquarters?: string | null; total_funding?: string | null; last_valuation?: string | null; key_investors?: string[]; competitors?: string[]; recent?: string | null }
@@ -27,8 +30,18 @@ interface SnapContent {
   research?: {
     panel?: Array<{ lens: string; summary: string; key_points?: string[]; risks?: string[]; confidence: number }>;
     verification?: { confidence: number; missing_sources?: string[]; recommendation: string; verdicts?: Array<{ claim: string; status: string; note: string }> };
+    grounding?: { coverage: number; supported: number; total: number };
     deepening?: { rounds?: Array<{ lever: string; confidence: number }>; cleared?: boolean; stopped_reason?: string; tiers_used?: string[]; llm_calls_total?: number } | null;
   };
+  positioning?: {
+    strategic_stance: string; tactical_stance?: string; conviction: number; conviction_basis?: string;
+    variant_view: string; is_consensus?: boolean;
+    price_target?: { bear: number | null; base: number | null; bull: number | null };
+    expected_return_pct?: number | null; risk_reward?: string; horizon?: string; sizing_guidance?: string;
+    catalysts?: Array<{ event: string; date: string | null; expected_direction?: string; why?: string }>;
+    invalidation_triggers?: string[];
+  };
+  key_debates?: Array<{ question: string; bull?: string; bear?: string; lean?: string }>;
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
@@ -61,6 +74,61 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
           {h.research_focus.length ? <div className="faint" style={{ marginTop: ".3rem", fontSize: ".82rem" }}>Research focus: {h.research_focus.join(" · ")}</div> : null}
         </div>
       </div>
+
+      {/* Verdict box (Doc 2 §1) — the 10-second read: the call, the edge, the numbers, the catalysts. */}
+      {content.positioning ? (() => {
+        const p = content.positioning!;
+        const pt = p.price_target;
+        return (
+          <div className="panel" style={{ marginTop: "1rem", borderLeft: "3px solid var(--accent, #6ea8fe)" }}>
+            <div className="spread" style={{ alignItems: "baseline" }}>
+              <div className="row" style={{ gap: ".5rem", alignItems: "baseline" }}>
+                <span className={`tag ${stanceTone(p.strategic_stance)}`} style={{ fontSize: ".95rem" }}>{STANCE_LABEL[p.strategic_stance] ?? p.strategic_stance}</span>
+                {p.tactical_stance ? <span className="tag">Tactical: {p.tactical_stance}</span> : null}
+                <span className="mono faint">conviction {p.conviction}/5</span>
+                {p.is_consensus ? <span className="tag warn">no edge · pass</span> : null}
+              </div>
+              {p.horizon ? <span className="faint" style={{ fontSize: ".8rem" }}>{p.horizon}</span> : null}
+            </div>
+            {(pt && (pt.bear != null || pt.base != null || pt.bull != null)) || p.risk_reward || p.sizing_guidance ? (
+              <div className="row" style={{ gap: "1.2rem", marginTop: ".5rem", flexWrap: "wrap", fontSize: ".9rem" }}>
+                {pt && (pt.bear != null || pt.base != null || pt.bull != null) ? (
+                  <span className="mono"><span className="faint">Target </span>bear {pt.bear ?? "—"} · base {pt.base ?? "—"} · bull {pt.bull ?? "—"}</span>
+                ) : null}
+                {p.expected_return_pct != null ? <span className="mono"><span className="faint">Exp. return </span>{p.expected_return_pct}%</span> : null}
+                {p.risk_reward ? <span className="mono"><span className="faint">R:R </span>{p.risk_reward}</span> : null}
+                {p.sizing_guidance ? <span className="mono"><span className="faint">Size </span>{p.sizing_guidance}</span> : null}
+              </div>
+            ) : null}
+            <p style={{ marginTop: ".6rem", marginBottom: 0, fontSize: ".95rem" }}>
+              <span className="faint">Variant view: </span>{p.variant_view}
+            </p>
+            {p.catalysts?.length ? (
+              <div style={{ marginTop: ".5rem" }}>
+                <span className="faint" style={{ fontSize: ".78rem" }}>Catalysts: </span>
+                {p.catalysts.map((c, i) => (
+                  <span key={i} className="tag" style={{ marginRight: 4 }}>{dirWord(c.expected_direction)} {c.event}{c.date ? ` · ${c.date}` : ""}</span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })() : null}
+
+      {/* Key debates (Doc 2 §4) — the load-bearing questions, each owned with a lean. */}
+      {content.key_debates?.length ? (
+        <div className="panel" style={{ marginTop: "1rem" }}>
+          <h2 style={{ marginTop: 0 }}>Key debates</h2>
+          {content.key_debates.map((d, i) => (
+            <div key={i} style={{ padding: ".4rem 0", borderBottom: "1px solid var(--panel-2)" }}>
+              <div style={{ fontWeight: 600, fontSize: ".9rem" }}>{d.question}</div>
+              {d.bull ? <div className="muted" style={{ fontSize: ".82rem" }}><span className="faint">Bull: </span>{d.bull}</div> : null}
+              {d.bear ? <div className="muted" style={{ fontSize: ".82rem" }}><span className="faint">Bear: </span>{d.bear}</div> : null}
+              {d.lean ? <div style={{ fontSize: ".82rem" }}><span className="faint">Our lean: </span>{d.lean}</div> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {/* Control surface */}
       <div className="panel" style={{ marginTop: "1rem" }}>

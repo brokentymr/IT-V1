@@ -35,6 +35,7 @@ import { detectSurprises, surpriseBriefing, type Observation } from "./surprise"
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 import { reconcileScenario } from "../financials/reconcile";
+import { positioningComplete, type PositioningDesk, type PositioningDecision } from "./positioning";
 
 interface CompanyRow {
   id: string;
@@ -234,6 +235,7 @@ export async function runCoveragePass(opts: {
   rng?: () => number; // injectable for deterministic Monte Carlo in tests
   focusOverride?: string[]; // per-run research focus (chat "Deepen research now"); merged, not persisted
   autoCommit?: (input: AutoCommitInput) => Promise<AutoCommitResult>; // Workstream C; omit to skip publish
+  positioningDesk?: PositioningDesk; // pipeline upgrade: the decision engine; omit to skip (tests/eval)
 }): Promise<CoverageResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -382,6 +384,26 @@ export async function runCoveragePass(opts: {
   }
   const synth = research.thesis;
 
+  // Positioning / decision (pipeline upgrade — Doc 2): convert the adjudicated research into an actual
+  // CALL — stance, variant view, target range, dated catalysts, sizing. Injectable; skipped when not
+  // wired (tests/eval). A description-only decision is blocked from auto-publish below.
+  let positioning: PositioningDecision | null = null;
+  if (opts.positioningDesk) {
+    const rg = scenario?.bands?.revenue_growth;
+    const eps = scenario?.bands?.eps;
+    const scenarioSummary = rg
+      ? `revenue growth P10/P50/P90 ${(rg.p10 * 100).toFixed(0)}/${(rg.p50 * 100).toFixed(0)}/${(rg.p90 * 100).toFixed(0)}%; EPS P10/P50/P90 ${eps ? `${eps.p10.toFixed(2)}/${eps.p50.toFixed(2)}/${eps.p90.toFixed(2)}` : "n/a"}; coherence: ${coherence.note}`
+      : "no scenario available";
+    positioning = await opts.positioningDesk.decide({
+      company: { legal_name: company.legal_name, ticker: company.primary_ticker, listing: company.listing },
+      thesis: { one_liner: synth.one_liner, long_form: synth.long_form, conviction: synth.conviction, key_debates: synth.key_debates, invalidation_triggers: synth.invalidation_triggers },
+      verification: { confidence: research.verification.confidence, grounded_coverage: grounding.report.coverage },
+      scenario_summary: scenarioSummary,
+      market_context: mc ? JSON.stringify({ consensus: mc.consensus, analyst_view: mc.analyst_view }) : undefined,
+      next_earnings_date: company.next_earnings_date,
+    }).catch((e) => { console.warn(`[coverage] positioning failed: ${(e as Error).message}`); return null; });
+  }
+
   const asOf = opts.asOf ?? model.period_end ?? todayIso();
   const cycleLabel = `${opts.formType ?? "Filing"} ${model.fiscal_period ?? asOf}`;
   const snapshotId = randomUUID();
@@ -415,7 +437,12 @@ export async function runCoveragePass(opts: {
       one_liner: synth.one_liner,
       long_form: `${synth.long_form}${synth.actual_vs_expected ? `\n\nActual vs expected: ${synth.actual_vs_expected}` : ""}`,
       tensions: synth.tensions,
-      catalysts: [],
+      // Catalysts now come from the decision engine (was always []). Keep only clean ISO dates.
+      catalysts: (positioning?.catalysts ?? []).map((c) => ({
+        event: c.event,
+        date: /^\d{4}-\d{2}-\d{2}$/.test(c.date ?? "") ? c.date : null,
+        expected_impact: `${c.expected_direction}${c.why ? `: ${c.why}` : ""}`,
+      })),
       invalidation_triggers: synth.invalidation_triggers,
       conviction: synth.conviction,
       positions_held: (company.coverage?.positions_held as never[]) ?? [],
@@ -449,6 +476,7 @@ export async function runCoveragePass(opts: {
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
+      ...(positioning ? { positioning } : {}),
       research: researchBlock,
       thesis,
       events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
@@ -513,8 +541,10 @@ export async function runCoveragePass(opts: {
   // spider. Runs AFTER the snapshot tx has committed, so it never holds that tx open across enqueue.
   // Omitted (e.g. in fundamentals tests) → the asset is left as-is and the result carries defaults.
   const dp = research.deepening;
-  // The grounding gate is a hard block on auto-commit: an ungrounded thesis never auto-publishes.
-  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated;
+  // Publish gates on auto-commit: an ungrounded thesis (§2) AND a description-only decision (Doc 2 §6 —
+  // no variant view or no catalysts) are both held for the human checkpoint, never auto-published.
+  const positioningOk = positioning ? positioningComplete(positioning).complete : true;
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;

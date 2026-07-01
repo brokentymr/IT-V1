@@ -19,6 +19,7 @@ import { SecAdapter } from "../sources/sec";
 import { FUNDAMENTALS_CONFIG } from "../config/fundamentals";
 import { DESK_CONFIG } from "../config/desk";
 import { autoCommit as runAutoCommit } from "../engines/autocommit";
+import { ClaudePositioningDesk } from "../engines/positioning";
 
 export interface OnboardJobData { company_id: string }
 
@@ -48,6 +49,7 @@ export function liveRunners(): OnboardRunners {
           analyst: new ClaudeFundamentalsAnalyst(), newsAnalyzer: new ClaudeNewsAnalyzer(),
           finance: new PerplexityFinance(), perplexity: new PerplexityClient(), sec,
           deskConfig: DESK_CONFIG, trigger: "manual", autoCommit: (input) => runAutoCommit(input),
+          positioningDesk: new ClaudePositioningDesk(),
         });
       } catch (e) {
         // Release the claim so the daily poll / webhook can re-drive this accession — otherwise a
