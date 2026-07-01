@@ -12,7 +12,6 @@ import { SecAdapter, nameAgrees } from "../sources/sec";
 import { ingestCompany, ingestByCik } from "./ingestion";
 import { bossQueue } from "../queue/boss";
 import { JOB, type Queue } from "../queue/types";
-import { FUNDAMENTALS_CONFIG } from "../config/fundamentals";
 
 export const ResolvedEntity = z.object({
   name: z.string(),
@@ -123,12 +122,8 @@ export async function createUnlistedCompany(e: { name: string; sector: string | 
   return { company_id: id, status: "created" };
 }
 
-async function enqueueCoverage(companyId: string, cik: string, sec: SecAdapter, queue: Queue): Promise<string | null> {
-  const f = await sec.recentFilings(cik, { forms: FUNDAMENTALS_CONFIG.triggerForms });
-  const latest = f.data?.find((x) => /^10-[KQ]$/.test(x.form)) ?? f.data?.[0];
-  if (!latest) return null;
-  return queue.enqueue(JOB.COVERAGE_PASS, { company_id: companyId, accession: latest.accession, form_type: latest.form, filing_url: latest.url });
-}
+/** Auto-on-add: enqueue the onboarding job that runs the whole pipeline to build clarity (level-up B). */
+const enqueueOnboard = (companyId: string, queue: Queue): Promise<string | null> => queue.enqueue(JOB.ONBOARD_ASSET, { company_id: companyId });
 
 /** Persist the operator's research-focus directives onto the company (read by the engines). */
 async function storeFocus(companyId: string, focus?: string[]): Promise<void> {
@@ -168,8 +163,7 @@ export async function addResolvedEntity(
     try {
       const res = await ingestCompany(e.ticker, { sec });
       await storeFocus(res.company_id, opts.research_focus);
-      const cik = (await query<{ cik: string | null }>("SELECT cik FROM companies WHERE id = $1", [res.company_id])).rows[0]?.cik;
-      if (autoRun && cik) await enqueueCoverage(res.company_id, cik, sec, queue).catch(() => null);
+      if (autoRun) await enqueueOnboard(res.company_id, queue).catch(() => null);
       return { name: e.name, company_id: res.company_id, listing: "listed", result: res.status === "created" ? "ingested" : "exists", research: autoRun ? "coverage" : "none" };
     } catch (err) {
       return profileFallback(e, queue, autoRun, opts.research_focus, `not in SEC EDGAR (${(err as Error).message.slice(0, 70)})`);
@@ -183,7 +177,7 @@ export async function addResolvedEntity(
       try {
         const res = await ingestByCik(cik, { sec, listing: "pre_ipo" });
         await storeFocus(res.company_id, opts.research_focus);
-        if (autoRun) await enqueueCoverage(res.company_id, cik, sec, queue).catch(() => null);
+        if (autoRun) await enqueueOnboard(res.company_id, queue).catch(() => null);
         return { name: e.name, company_id: res.company_id, listing: "pre_ipo", result: res.status === "created" ? "ingested" : "exists", research: autoRun ? "coverage" : "none", detail: `S-1 filer (CIK ${cik})` };
       } catch { /* fall through to a profile */ }
     }
@@ -200,6 +194,6 @@ async function profileFallback(
   const listing = e.listing === "pre_ipo" ? "pre_ipo" : "private";
   const u = await createUnlistedCompany({ name: e.name, sector: e.sector, listing });
   await storeFocus(u.company_id, focus);
-  if (autoRun) await queue.enqueue(JOB.PROFILE_PASS, { company_id: u.company_id }).catch(() => null);
+  if (autoRun) await enqueueOnboard(u.company_id, queue).catch(() => null);
   return { name: e.name, company_id: u.company_id, listing, result: u.status === "created" ? "created" : "exists", research: autoRun ? "profile" : "none", detail };
 }

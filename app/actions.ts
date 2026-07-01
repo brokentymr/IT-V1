@@ -17,6 +17,8 @@ export async function addCompany(formData: FormData): Promise<void> {
   const ticker = String(formData.get("ticker") ?? "").trim().toUpperCase();
   if (!ticker) return;
   const res = await ingestCompany(ticker);
+  // Auto-on-add: build clarity automatically (level-up B).
+  await bossQueue.enqueue(JOB.ONBOARD_ASSET, { company_id: res.company_id }).catch(() => null);
   revalidatePath("/universe");
   redirect(`/company/${res.company_id}`);
 }

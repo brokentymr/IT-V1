@@ -113,7 +113,7 @@ describe("agentic intake (integration)", () => {
     expect(c.rows[0].primary_ticker).toBeNull();
     expect(c.rows[0].cik).toBeNull();
     expect(c.rows[0].listing).toBe("private");
-    expect(queue.jobs.some((j) => j.name === "profile-pass")).toBe(true);
+    expect(queue.jobs.some((j) => j.name === "onboard-asset")).toBe(true);
     // idempotent on name
     const again = await createUnlistedCompany({ name: "SpaceX", sector: "Industrials", listing: "private" });
     expect(again.status).toBe("exists");
@@ -141,7 +141,7 @@ describe("agentic intake (integration)", () => {
     expect(c.rows[0].legal_name).toBe("Aritzia");      // NOT "ATERIAN INC"
     expect(c.rows[0].primary_ticker).toBeNull();
     expect(c.rows[0].cik).toBeNull();
-    expect(queue.jobs.some((j) => j.name === "profile-pass")).toBe(true);
+    expect(queue.jobs.some((j) => j.name === "onboard-asset")).toBe(true);
   });
 
   it("runs a Perplexity profile pass → a snapshot with a profile + thesis", async () => {
