@@ -19,6 +19,7 @@
     "price-monitor": "tsx scripts/price-monitor.ts",
     "sentiment": "tsx scripts/sentiment.ts",
     "eval:fundamentals": "tsx scripts/eval-fundamentals.ts",
+    "eval:desk": "tsx scripts/eval-desk.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
