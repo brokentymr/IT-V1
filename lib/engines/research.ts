@@ -13,6 +13,7 @@ import { completeJSON, CostCeilingError } from "../llm/client";
 import { RESOLUTION_VERDICTS } from "./areas_of_interest";
 import { deepenToConfidence, type DeepenSteps, type DeepeningTrace } from "./deepen";
 import { ClaudeDeskManager } from "./desk_manager";
+import { claimsDigest, divergenceNote } from "./adjudication";
 import { DESK_CONFIG, type DeskConfig } from "../config/desk";
 
 const LENS = z.enum(["equity", "sector", "technology", "risk"]);
@@ -30,11 +31,22 @@ export const ExpertContribution = z.object({
 });
 export type ExpertContribution = z.infer<typeof ExpertContribution>;
 
+export const KeyDebate = z.object({
+  question: z.string(),
+  bull: z.string().default(""),
+  bear: z.string().default(""),
+  lean: z.string().default(""), // the desk's adjudicated lean + why
+});
+export type KeyDebate = z.infer<typeof KeyDebate>;
+
 export const ThesisSynthesis = z.object({
   one_liner: z.string(),
   long_form: z.string(),
   actual_vs_expected: z.string().default(""),
   tensions: z.array(z.string()).default([]),
+  // The load-bearing questions the thesis rests on, each OWNED with a bull/bear and the desk's lean —
+  // this is where lens disagreement is adjudicated instead of averaged (pipeline upgrade §4).
+  key_debates: z.array(KeyDebate).default([]),
   invalidation_triggers: z.array(z.string()).min(1),
   conviction: z.number().int().min(1).max(5),
   claims_to_verify: z.array(z.string()).default([]),
@@ -216,17 +228,25 @@ Do not present a prior as if it were grounded. JSON:
 
   private synthesize(panel: ExpertContribution[], block: string, focus?: string[]): Promise<ThesisSynthesis> {
     const panelText = panel.map((p) => `### ${p.lens} (confidence ${p.confidence})\n${p.summary}\nKey: ${p.key_points.join("; ")}\nRisks: ${p.risks.join("; ")}`).join("\n\n");
-    const prompt = `You are the head of research. Synthesize the desk's panel into the house view — reconcile disagreements, do not just average. Keep long_form to ~5 sentences; each list to at most 5 short items. The invalidation triggers MUST be specific and measurable. List the load-bearing factual CLAIMS (at most 8) that should be fact-checked before publishing.${focusNote(focus)}
+    // Adjudication (pipeline upgrade §4): show the synthesizer the per-lens claims (grounded vs prior)
+    // and, when the lenses disagree materially, force it to RULE rather than average.
+    const digest = claimsDigest(panel);
+    const divergence = divergenceNote(panel);
+    const prompt = `You are the head of research. Synthesize the desk's panel into the house view. Your job is to ADJUDICATE, not average: where the lenses disagree, rule on it. A dispute over a FACT (is a figure real, what is the share) is settled against the evidence — decide and say which lens is right. A dispute over JUDGMENT (is a margin durable) is OWNED as a key_debate with the bull case, the bear case, and your lean. Rely on GROUNDED claims for the confident thesis; treat "prior" claims as unverified and put them in claims_to_verify rather than the thesis. Keep long_form to ~5 sentences; each list to at most 5 short items; at most 3 key_debates. Invalidation triggers MUST be specific and measurable.${divergence ? `\n\n${divergence}` : ""}${focusNote(focus)}
 
 ${block}
 
 Panel:
 ${panelText}
 
+Per-lens claims (grounded = backed by the evidence above; prior = the lens's own background knowledge):
+${digest}
+
 Return JSON:
 {"one_liner": string, "long_form": string, "actual_vs_expected": string, "tensions": [string],
+ "key_debates": [{"question": string, "bull": string, "bear": string, "lean": string}],
  "invalidation_triggers": [string], "conviction": int 1-5, "claims_to_verify": [string]}`;
-    return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 2600 });
+    return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 3000 });
   }
 
   private verify(thesis: ThesisSynthesis, panel: ExpertContribution[], block: string): Promise<VerificationResult> {

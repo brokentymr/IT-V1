@@ -441,6 +441,7 @@ export async function runCoveragePass(opts: {
       ...(hypothesesBlock ? { hypotheses: hypothesesBlock } : {}),
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
       ...(surprises.length ? { surprises } : {}),
+      ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
       research: researchBlock,
       thesis,
       events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
