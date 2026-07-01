@@ -17,6 +17,7 @@ export default async function UniversePage({ searchParams }: { searchParams: Pro
         <h1 style={{ margin: 0 }}>Universe</h1>
         <div className="row">
           <a href="/calendar" className="faint">calendar →</a>
+          <a href="/content" className="faint">content →</a>
           <span className="muted">{rows.length} asset{rows.length === 1 ? "" : "s"}</span>
         </div>
       </div>

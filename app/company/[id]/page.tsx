@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { getCompanyDetail } from "../../../lib/views/company";
 import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, addLink, setLinkStatus, deleteLink } from "../../actions";
+import { generateContentAction } from "../../content-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -27,8 +28,9 @@ interface SnapContent {
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
-export default async function CompanyPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function CompanyPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ content_error?: string }> }) {
   const { id } = await params;
+  const { content_error } = await searchParams;
   const d = await getCompanyDetail(id);
   if (!d) notFound();
   const { header: h, latest, approval, relationships, feed, signals, areas, sentiment } = d;
@@ -78,6 +80,23 @@ export default async function CompanyPage({ params }: { params: Promise<{ id: st
           <a href="/jobs" className="faint">watch pipeline →</a>
         </div>
       </div>
+
+      {/* Content generation — gated on the §8 human checkpoint (an approved thesis). */}
+      {content_error ? <p className="tag warn" style={{ display: "block", marginTop: "1rem" }}>Content: {decodeURIComponent(content_error)}</p> : null}
+      {approval ? (
+        <div className="panel" style={{ marginTop: "1rem" }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="row">
+              <form action={generateContentAction} className="inline"><input type="hidden" name="company_id" value={h.id} /><button type="submit">✦ Generate content (deck · newsletter · short-form)</button></form>
+              <a className="ghost" href={`/content/studio/${h.id}`} style={{ padding: ".4rem .8rem" }}>🎙 Podcast studio</a>
+            </div>
+            <a href="/content" className="faint">content library →</a>
+          </div>
+          <p className="faint" style={{ fontSize: ".78rem", marginTop: ".4rem" }}>Thesis approved {approval.approved_at.replace("T", " ")} — content builds from this approved snapshot, sourced and disclosed.</p>
+        </div>
+      ) : (
+        <p className="faint" style={{ marginTop: "1rem", fontSize: ".82rem" }}>Approve the thesis (below) to unlock content generation — the §8 checkpoint gate.</p>
+      )}
 
       {/* Areas of interest — between-filing developments accumulate from the headlines and the
           filing-triggered desk resolves them. The cluster of open items is the salience signal. */}
