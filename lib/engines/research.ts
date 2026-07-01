@@ -24,7 +24,7 @@ export const ExpertContribution = z.object({
   lens: LENS,
   summary: z.string(),
   key_points: z.array(z.string()).default([]),
-  claims: z.array(z.object({ statement: z.string(), basis: z.string(), confidence: Confidence })).default([]),
+  claims: z.array(z.object({ statement: z.string(), basis: z.string(), grounded: z.boolean().default(false), confidence: Confidence })).default([]),
   risks: z.array(z.string()).default([]),
   confidence: Confidence,
 });
@@ -204,9 +204,12 @@ Return JSON: {"resolutions": [{"theme": string, "verdict": "invalidated|confirme
 ${block}
 
 Return your contribution as JSON — be specific, do not pad. Keep summary to 2-3 sentences; at most
-5 key_points, 5 claims, 5 risks. For each material CLAIM give the basis and a confidence in [0,1]. JSON:
+5 key_points, 5 claims, 5 risks. For each material CLAIM give the basis and a confidence in [0,1], and
+set "grounded": true ONLY if the basis is actually stated in the Evidence above — set it false when the
+claim rests on your own background knowledge (an analyst prior to be verified, not a sourced fact).
+Do not present a prior as if it were grounded. JSON:
 {"lens": "${lens}", "summary": string, "key_points": [string],
- "claims": [{"statement": string, "basis": string, "confidence": number}],
+ "claims": [{"statement": string, "basis": string, "grounded": boolean, "confidence": number}],
  "risks": [string], "confidence": number}`;
     return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 1800 });
   }

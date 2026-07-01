@@ -38,7 +38,7 @@ export function fakeResearchPanel(
     async runResearch(): Promise<ResearchResult> {
       return {
         panel: [
-          { lens: "equity", summary: "Strong fundamentals.", key_points: ["margin"], claims: [{ statement: "revenue grew", basis: "XBRL", confidence: 0.9 }], risks: ["valuation"], confidence: 0.8 },
+          { lens: "equity", summary: "Strong fundamentals.", key_points: ["margin"], claims: [{ statement: "revenue grew", basis: "XBRL", grounded: true, confidence: 0.9 }], risks: ["valuation"], confidence: 0.8 },
           { lens: "sector", summary: "Leader.", key_points: ["share"], claims: [], risks: ["competition"], confidence: 0.75 },
           { lens: "technology", summary: "Wide moat.", key_points: ["ecosystem"], claims: [], risks: ["disruption"], confidence: 0.8 },
           { lens: "risk", summary: "Bear case: demand.", key_points: [], claims: [], risks: ["demand destruction"], confidence: 0.6 },

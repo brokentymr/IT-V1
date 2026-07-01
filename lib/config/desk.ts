@@ -40,6 +40,12 @@ export interface DeskConfig {
    *  confidently done) instead of the fixed ladder. */
   managerEnabled: boolean;
   managerModel: string;
+  /** Grounding gate (pipeline upgrade §2): minimum fraction of load-bearing claims that must be
+   *  SUPPORTED by evidence for an "auto" recommendation to survive. Below this, the thesis is held
+   *  for review however confident it sounds — a confident-but-ungrounded view never auto-publishes. */
+  minGroundedCoverage: number;
+  /** When true, the retrieval planner fetches the facts a thesis needs BEFORE the desk runs. */
+  retrievalPlannerEnabled: boolean;
 }
 
 export const DESK_CONFIG: DeskConfig = {
@@ -60,4 +66,6 @@ export const DESK_CONFIG: DeskConfig = {
   publishStatus: "published",
   managerEnabled: true,
   managerModel: "claude-opus-4-8",
+  minGroundedCoverage: 0.5,
+  retrievalPlannerEnabled: true,
 };

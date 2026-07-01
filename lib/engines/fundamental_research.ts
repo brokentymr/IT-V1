@@ -32,6 +32,8 @@ import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
 import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_interest";
 import { detectSurprises, surpriseBriefing, type Observation } from "./surprise";
+import { applyGroundingGate } from "./grounding";
+import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 
 interface CompanyRow {
   id: string;
@@ -201,6 +203,7 @@ export interface CoverageResult {
   drivers_extracted: number;
   scenario: ScenarioOutput | null;
   confidence: number;
+  grounded_coverage: number; // pipeline upgrade §2: fraction of load-bearing claims backed by evidence
   needs_review: boolean;
   areas_addressed: number;
   areas_resolved: number;
@@ -318,19 +321,58 @@ export async function runCoveragePass(opts: {
     : undefined;
 
   const researchFocus = [...new Set([...(company.coverage?.research_focus ?? []), ...(opts.focusOverride ?? [])])];
+
+  // 3f. Retrieval planner (pipeline upgrade §2): fetch the specific facts a thesis needs BEFORE the
+  // desk runs, so the panel reasons over sourced context instead of its own memory. Best-effort;
+  // skipped without a Perplexity client (e.g. tests). Fetched context is labeled grounded.
+  let evidenceForDesk = evidence;
+  if (deskConfig.retrievalPlannerEnabled && opts.perplexity) {
+    try {
+      const figuresLine = Object.values(model.line_items)
+        .map((x) => `${x.label} ${x.unit === "USD/shares" ? x.value.toFixed(2) : (Math.abs(x.value) >= 1e9 ? `$${(x.value / 1e9).toFixed(1)}B` : `$${(x.value / 1e6).toFixed(0)}M`)}`)
+        .join("; ");
+      const plan = await new ClaudeRetrievalPlanner().plan({
+        company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector },
+        figures: figuresLine, focus: researchFocus,
+      });
+      const fetched: string[] = [];
+      for (const q of plan.questions) {
+        const a = await opts.perplexity.askText({
+          question: `For ${company.legal_name} (${company.primary_ticker}): ${q.question} Cite figures and dates; be concise.`,
+          maxTokens: 400, purpose: "research.retrieval_fetch",
+        }).catch(() => null);
+        if (a?.ok && a.text) fetched.push(`- ${q.topic}: ${a.text}`);
+      }
+      if (fetched.length) {
+        evidenceForDesk = `${evidence}\n\nSourced external context (retrieval planner — treat as grounded evidence):\n${fetched.join("\n")}`;
+      }
+    } catch (e) {
+      console.warn(`[coverage] retrieval planner failed: ${(e as Error).message}`);
+    }
+  }
+
   // Per-asset deepen budget: stop escalating once THIS run has spent deepenBudgetUsd (measured as the
   // ledger delta since the pass began). Round 0 always runs; only the deepening rounds are gated.
   const spendAtStart = await llmSpendThisMonth();
   const panel = opts.panel ?? new ClaudeResearchPanel({ config: deskConfig });
   const research = await panel.runResearch({
     company: { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector, listing: company.listing },
-    evidence,
+    evidence: evidenceForDesk,
     rolling_outlook: cf.rolling_outlook,
     forward_expectations: cf.forward?.expectations ?? null,
     research_focus: researchFocus.length ? researchFocus : undefined,
     enrich,
     withinBudget: async () => (await llmSpendThisMonth()) - spendAtStart < deskConfig.deepenBudgetUsd,
   });
+
+  // Grounding gate (pipeline upgrade §2): a confident thesis carried mostly by ungrounded priors
+  // (the Micron failure — only 2/13 claims backed by evidence) must not auto-publish. Downgrade to
+  // review; the human checkpoint decides. Never upgrades review → auto.
+  const grounding = applyGroundingGate(research.verification, deskConfig.minGroundedCoverage);
+  if (grounding.gated) {
+    research.verification.recommendation = "review";
+    console.log(`[coverage] grounding gate held ${company.primary_ticker} for review: ${grounding.reason}`);
+  }
   const synth = research.thesis;
 
   const asOf = opts.asOf ?? model.period_end ?? todayIso();
@@ -376,6 +418,7 @@ export async function runCoveragePass(opts: {
     const researchBlock = {
       panel: research.panel,
       verification: research.verification,
+      grounding: grounding.report, // pipeline upgrade §2: grounded-coverage of the load-bearing claims
       deepening: research.deepening ?? null, // Workstream C escalation trace (for the report UI + chat)
       provenance: [{ claim_id: "research", source_ref: sourceId }],
     };
@@ -462,7 +505,8 @@ export async function runCoveragePass(opts: {
   // spider. Runs AFTER the snapshot tx has committed, so it never holds that tx open across enqueue.
   // Omitted (e.g. in fundamentals tests) → the asset is left as-is and the result carries defaults.
   const dp = research.deepening;
-  const cleared = dp ? dp.cleared : research.verification.recommendation !== "review";
+  // The grounding gate is a hard block on auto-commit: an ungrounded thesis never auto-publishes.
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;
@@ -487,6 +531,7 @@ export async function runCoveragePass(opts: {
     missing_metrics: missing, links_enriched: linksEnriched, read_through_notes: readThroughNotes,
     drivers_extracted: drivers.length, scenario,
     confidence: research.verification.confidence,
+    grounded_coverage: grounding.report.coverage,
     needs_review: research.verification.recommendation === "review",
     areas_addressed: openAreas.length, areas_resolved: areasResolved, areas_carried: areasCarried,
     committed, published_status: publishedStatus, content_job_id: contentJobId,
