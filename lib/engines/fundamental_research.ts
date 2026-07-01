@@ -34,6 +34,7 @@ import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_inter
 import { detectSurprises, surpriseBriefing, type Observation } from "./surprise";
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
+import { reconcileScenario } from "../financials/reconcile";
 
 interface CompanyRow {
   id: string;
@@ -289,7 +290,13 @@ export async function runCoveragePass(opts: {
   const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null, mc?.consensus ?? null));
   const briefing = surpriseBriefing(surprises);
 
-  const evidence = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
+  // 3d-ter. Model coherence (pipeline upgrade §5): do the drivers and the Monte Carlo tell the same
+  // story? An incoherent quant is surfaced to the desk (and stamped on the snapshot) rather than
+  // presented as one model.
+  const coherence = reconcileScenario(drivers, scenario?.bands?.revenue_growth ?? null);
+
+  const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
+  const evidence = coherence.agree ? evidenceBase : `${evidenceBase}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
   // the Workstream-C deepening loop. When verification is short of the bar, `enrich` gap-fills on the
@@ -428,7 +435,7 @@ export async function runCoveragePass(opts: {
       ? { as_of: new Date().toISOString(), filing_ref: opts.accession, drivers, provenance: [{ claim_id: "hypotheses", source_ref: sourceId }] }
       : undefined;
     const scenarioBlock = scenario
-      ? { ...scenario, anchor: (mc?.consensus as Record<string, unknown> | null) ?? null, provenance: [{ claim_id: "scenario", source_ref: sourceId }] }
+      ? { ...scenario, anchor: (mc?.consensus as Record<string, unknown> | null) ?? null, coherence, provenance: [{ claim_id: "scenario", source_ref: sourceId }] }
       : undefined;
 
     const content = {
