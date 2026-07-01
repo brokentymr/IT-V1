@@ -41,6 +41,12 @@ describe("detectTrueDataRejection", () => {
   it("does not fire on an output that leaned into the surprise", () => {
     expect(detectTrueDataRejection(newMicron).rejected).toBe(false);
   });
+  it("does not false-positive when a rejection phrase appears in AFFIRMING/refuting context", () => {
+    const affirming: EvalContent = {
+      research: { panel: [{ lens: "equity", claims: [{ statement: "The +346% revenue and +899% gross profit are real and reflect a genuine HBM mix shift, not a data artifact.", grounded: true }] }] },
+    };
+    expect(detectTrueDataRejection(affirming).rejected).toBe(false);
+  });
 });
 
 describe("groundednessScore + decisionCompleteness + coherenceState", () => {

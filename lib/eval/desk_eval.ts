@@ -28,6 +28,9 @@ export interface EvalContent {
  * We scan the panel and the verdicts for the language of disbelief aimed at reported data. A hit means
  * the desk called real data fake — an automatic F.
  */
+// Phrases that call reported data FAKE — kept to the unambiguous ones. Broader phrases like "outside
+// any plausible range" or "period aggregation" were removed: a real analyst uses them for durability
+// ("84% is outside the plausible range for a SUSTAINED margin"), which is analysis, not data-rejection.
 const REJECTION_PHRASES = [
   "physically impossible",
   "statistically implausible",
@@ -36,17 +39,18 @@ const REJECTION_PHRASES = [
   "extraction error",
   "xbrl error",
   "almost certainly a data",
+  "data corruption",
   "data integrity",
   "data artifact",
   "tagging error",
-  "period-aggregation error",
-  "period aggregation",
-  "aggregate trailing twelve",
   "should not be used as ground truth",
   "not be used as ground truth",
-  "outside any plausible range",
   "contain material errors",
 ];
+
+// If the same text AFFIRMS the data is real, a rejection phrase in it is being REFUTED, not asserted —
+// don't flag it (fixes the false positive on "...are real and are explained by...not a data artifact").
+const AFFIRMING_PHRASES = ["are real", "is real", "are genuine", "is genuine", "reflect genuine", "not a data error", "not an artifact", "not a bug", "not a data artifact", "rather than accounting anomaly", "rather than an artifact"];
 
 export function detectTrueDataRejection(c: EvalContent): { rejected: boolean; hits: string[] } {
   const texts: string[] = [];
@@ -62,7 +66,9 @@ export function detectTrueDataRejection(c: EvalContent): { rejected: boolean; hi
   const hits: string[] = [];
   for (const t of texts) {
     const lower = t.toLowerCase();
-    if (REJECTION_PHRASES.some((p) => lower.includes(p))) hits.push(t.slice(0, 140));
+    if (REJECTION_PHRASES.some((p) => lower.includes(p)) && !AFFIRMING_PHRASES.some((a) => lower.includes(a))) {
+      hits.push(t.slice(0, 140));
+    }
   }
   return { rejected: hits.length > 0, hits: [...new Set(hits)].slice(0, 8) };
 }

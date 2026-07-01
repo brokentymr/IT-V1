@@ -223,7 +223,10 @@ Do not present a prior as if it were grounded. JSON:
 {"lens": "${lens}", "summary": string, "key_points": [string],
  "claims": [{"statement": string, "basis": string, "grounded": boolean, "confidence": number}],
  "risks": [string], "confidence": number}`;
-    return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 1800 });
+    // 3000, not 1800: lens JSON (summary + up to 5 claims each with statement/basis/grounded/confidence
+    // + key_points + risks) was truncating at the ceiling, so the JSON failed to parse and the whole
+    // lens was silently dropped — non-deterministically thinning the panel (4 lenses → A, 2 → F).
+    return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 3000 });
   }
 
   private synthesize(panel: ExpertContribution[], block: string, focus?: string[]): Promise<ThesisSynthesis> {
