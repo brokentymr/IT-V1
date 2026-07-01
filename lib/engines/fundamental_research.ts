@@ -289,7 +289,7 @@ export async function runCoveragePass(opts: {
   // 3d-bis. Surprise investigation (pipeline upgrade): flag figures that deviate sharply from the
   // company's own history or consensus, and instruct the desk to EXPLAIN them rather than dismiss
   // them as errors. This is what stops the desk from rejecting a true, market-moving print.
-  const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null, mc?.consensus ?? null));
+  const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null));
   const briefing = surpriseBriefing(surprises);
 
   // 3d-ter. Model coherence (pipeline upgrade §5): do the drivers and the Monte Carlo tell the same
@@ -606,7 +606,6 @@ function buildEvidence(
 function buildSurpriseObservations(
   model: FinancialModel,
   priorModel: FinancialModel | null,
-  consensus: unknown,
 ): Observation[] {
   const obs: Observation[] = [];
 
@@ -628,13 +627,11 @@ function buildSurpriseObservations(
     }
   }
 
-  const cons = consensus as { revenue_estimate_usd?: number | null; eps_estimate?: number | null } | null;
-  if (cons?.revenue_estimate_usd && model.line_items.revenue) {
-    obs.push({ key: "cons.revenue", label: "Revenue vs consensus", current: model.line_items.revenue.value, baseline: cons.revenue_estimate_usd, baselineSource: "consensus", kind: "vs_consensus", unit: "USD" });
-  }
-  if (cons?.eps_estimate && model.line_items.eps_diluted) {
-    obs.push({ key: "cons.eps", label: "EPS vs consensus", current: model.line_items.eps_diluted.value, baseline: cons.eps_estimate, baselineSource: "consensus", kind: "vs_consensus", unit: "USD/shares" });
-  }
+  // NOTE: no consensus beat/miss surprise here. The consensus we fetch is the NEXT-quarter estimate
+  // (Perplexity: "consensus for the NEXT quarter"), so comparing it to the JUST-REPORTED quarter is
+  // period-mismatched and produced a spurious "miss" (e.g. reported Q3 $41.5B vs next-quarter $50.76B
+  // read as -18%). A real beat/miss needs the same-period estimate, which we don't reliably have; the
+  // forward consensus is used correctly downstream as the next-period bar (scenario + positioning).
 
   return obs;
 }
