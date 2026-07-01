@@ -31,6 +31,7 @@ import type { AutoCommitInput, AutoCommitResult } from "./autocommit";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
 import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_interest";
+import { detectSurprises, surpriseBriefing, type Observation } from "./surprise";
 
 interface CompanyRow {
   id: string;
@@ -278,7 +279,14 @@ export async function runCoveragePass(opts: {
   // 3d. Open areas of interest — the between-filing developments the News Monitor accumulated. The
   // desk reasons over them explicitly, then adjudicates which this filing resolves (step 7).
   const openAreas = await loadOpenAreas(company.id);
-  const evidence = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`);
+
+  // 3d-bis. Surprise investigation (pipeline upgrade): flag figures that deviate sharply from the
+  // company's own history or consensus, and instruct the desk to EXPLAIN them rather than dismiss
+  // them as errors. This is what stops the desk from rejecting a true, market-moving print.
+  const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null, mc?.consensus ?? null));
+  const briefing = surpriseBriefing(surprises);
+
+  const evidence = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
   // the Workstream-C deepening loop. When verification is short of the bar, `enrich` gap-fills on the
@@ -389,6 +397,7 @@ export async function runCoveragePass(opts: {
       ...(marketContext ? { market_context: marketContext } : {}),
       ...(hypothesesBlock ? { hypotheses: hypothesesBlock } : {}),
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
+      ...(surprises.length ? { surprises } : {}),
       research: researchBlock,
       thesis,
       events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
@@ -488,10 +497,11 @@ export async function runCoveragePass(opts: {
 /** Assemble the evidence the analyst desk reasons over (figures are ground truth; the rest advisory). */
 function buildEvidence(
   model: FinancialModel, diff: SnapshotDiff, drivers: Driver[], scenario: ScenarioOutput | null,
-  mc: MarketContextData | null, openAreas: OpenArea[], filingLabel: string,
+  mc: MarketContextData | null, openAreas: OpenArea[], filingLabel: string, surpriseBrief = "",
 ): string {
   const b = (n: number) => (Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
-  const lines: string[] = [`Filing: ${filingLabel}.`];
+  // The surprise briefing leads: it must frame how the desk reads every figure below it.
+  const lines: string[] = surpriseBrief ? [surpriseBrief, "", `Filing: ${filingLabel}.`] : [`Filing: ${filingLabel}.`];
   const li = Object.values(model.line_items).map((x) => `${x.label} ${x.unit === "USD/shares" ? x.value.toFixed(2) : b(x.value)}${x.yoy ? ` (YoY ${(x.yoy.change_pct * 100).toFixed(1)}%)` : ""}`);
   if (li.length) lines.push(`Figures (XBRL — ground truth): ${li.join("; ")}`);
   const ratios = Object.entries(model.ratios).map(([k, v]) => `${k.replace("_", " ")} ${(v * 100).toFixed(1)}%`);
@@ -506,6 +516,44 @@ function buildEvidence(
     lines.push(`Open areas of interest to address (accumulated from the headlines since the last filing): ${openAreas.map((a) => `[${a.theme}] ${a.title}${a.mentions > 1 ? ` (×${a.mentions})` : ""}`).join("; ")}`);
   }
   return lines.join("\n");
+}
+
+/** Turn the reported model (+ prior snapshot + consensus) into surprise observations: YoY growth per
+ *  line item, margin percentage-point moves vs the prior snapshot, and beats/misses vs consensus. */
+function buildSurpriseObservations(
+  model: FinancialModel,
+  priorModel: FinancialModel | null,
+  consensus: unknown,
+): Observation[] {
+  const obs: Observation[] = [];
+
+  for (const [key, li] of Object.entries(model.line_items)) {
+    if (li.yoy && Number.isFinite(li.yoy.change_pct)) {
+      const growth = li.yoy.change_pct;
+      const priorYear = growth !== -1 ? li.value / (1 + growth) : 0;
+      obs.push({ key: `yoy.${key}`, label: `${li.label} YoY`, current: li.value, baseline: priorYear, baselineSource: "prior-year (XBRL)", kind: "yoy_growth", unit: li.unit });
+    }
+  }
+
+  if (priorModel?.ratios) {
+    for (const rk of ["gross_margin", "operating_margin", "net_margin"]) {
+      const cur = model.ratios[rk];
+      const pr = priorModel.ratios[rk];
+      if (cur != null && pr != null) {
+        obs.push({ key: `margin.${rk}`, label: rk.replace("_", " "), current: cur, baseline: pr, baselineSource: "prior snapshot", kind: "margin_pp", unit: "ratio" });
+      }
+    }
+  }
+
+  const cons = consensus as { revenue_estimate_usd?: number | null; eps_estimate?: number | null } | null;
+  if (cons?.revenue_estimate_usd && model.line_items.revenue) {
+    obs.push({ key: "cons.revenue", label: "Revenue vs consensus", current: model.line_items.revenue.value, baseline: cons.revenue_estimate_usd, baselineSource: "consensus", kind: "vs_consensus", unit: "USD" });
+  }
+  if (cons?.eps_estimate && model.line_items.eps_diluted) {
+    obs.push({ key: "cons.eps", label: "EPS vs consensus", current: model.line_items.eps_diluted.value, baseline: cons.eps_estimate, baselineSource: "consensus", kind: "vs_consensus", unit: "USD/shares" });
+  }
+
+  return obs;
 }
 
 /** Build the Monte Carlo next-period scenario from MD&A drivers + XBRL history + consensus. */
