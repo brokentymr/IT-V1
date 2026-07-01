@@ -6,7 +6,7 @@
  */
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { query } from "../lib/db/pool";
+import { query, withTransaction } from "../lib/db/pool";
 import { ingestCompany } from "../lib/engines/ingestion";
 import { SecAdapter } from "../lib/sources/sec";
 import { bossQueue, cancelCompanyJobs } from "../lib/queue/boss";
@@ -34,8 +34,13 @@ export async function deleteCompany(formData: FormData): Promise<void> {
   if (!companyId) return;
   // 1. Cancel pending/active queue jobs so nothing keeps processing a company we're about to delete.
   await cancelCompanyJobs(companyId).catch(() => 0);
-  // 2. Remove the company; ON DELETE CASCADE removes all dependent rows.
-  await query("DELETE FROM companies WHERE id = $1", [companyId]);
+  // 2. Remove the company; ON DELETE CASCADE removes all dependent rows. canonical_snapshots is
+  //    append-only (forbid_mutation trigger), so we opt this one transaction into an authorized purge
+  //    (migration 0017) — scoped to this delete, nothing else can delete a snapshot.
+  await withTransaction(async (client) => {
+    await client.query("SET LOCAL app.allow_purge = 'on'");
+    await client.query("DELETE FROM companies WHERE id = $1", [companyId]);
+  });
   revalidatePath("/universe");
   revalidatePath("/");
   redirect("/universe");
