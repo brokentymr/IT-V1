@@ -34,7 +34,8 @@ interface DagContent {
   scenario?: { target_period?: string | null; bands?: Record<string, ScenarioBand>; watch_items?: string[]; provenance?: ProvEntry[] };
   levers?: Record<string, unknown>;
   market_context?: { provenance?: ProvEntry[] };
-  key_debates?: string[];
+  // key_debates are typed objects (question/bull/bear/lean), not strings — see extractClaims.
+  key_debates?: Array<string | { question?: string; bull?: string; bear?: string; lean?: string }>;
   thesis?: { one_liner?: string; long_form?: string; tensions?: string[]; invalidation_triggers?: string[] };
 }
 
@@ -131,7 +132,7 @@ export function catalogFacts(content: DagContent): FactDescriptor[] {
 export function extractClaims(content: DagContent): ClaimDescriptor[] {
   const claims: ClaimDescriptor[] = [];
   const push = (claim_kind: string, text: string | undefined | null, ordinal: number) => {
-    const t = (text ?? "").trim();
+    const t = (typeof text === "string" ? text : "").trim(); // defensive: never .trim a non-string
     if (t) claims.push({ claim_kind, ordinal, text: t });
   };
   const th = content.thesis;
@@ -139,7 +140,7 @@ export function extractClaims(content: DagContent): ClaimDescriptor[] {
   push("long_form", th?.long_form, 0);
   (th?.tensions ?? []).forEach((t, i) => push("tension", t, i));
   (th?.invalidation_triggers ?? []).forEach((t, i) => push("invalidation_trigger", t, i));
-  (content.key_debates ?? []).forEach((t, i) => push("key_debate", t, i));
+  (content.key_debates ?? []).forEach((d, i) => push("key_debate", typeof d === "string" ? d : [d?.question, d?.lean].filter(Boolean).join(" — "), i));
   (content.scenario?.watch_items ?? []).forEach((t, i) => push("watch_item", t, i));
   (content.hypotheses?.drivers ?? []).forEach((d, i) => push("driver_framing", d.framing ?? d.name, i));
   return claims;

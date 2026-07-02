@@ -89,6 +89,19 @@ describe("claim_dag — pure derivation (P4)", () => {
     expect(claims.every((c) => c.text.length > 0)).toBe(true);
   });
 
+  it("handles key_debates as typed objects (real synthesis shape), not just strings", () => {
+    // Regression: the desk emits key_debates as {question,bull,bear,lean} objects; passing the object
+    // straight to .trim() threw "(text ?? '').trim is not a function" and silently killed the DAG.
+    const claims = extractClaims({
+      ...content,
+      key_debates: [{ question: "Is the 84.6% gross margin durable?", bull: "structural HBM mix", bear: "peak cyclical", lean: "peak, ~2 quarters" }],
+    } as never);
+    const kd = claims.find((c) => c.claim_kind === "key_debate");
+    expect(kd).toBeTruthy();
+    expect(kd!.text).toContain("Is the 84.6% gross margin durable?");
+    expect(kd!.text).toContain("peak, ~2 quarters");
+  });
+
   it("resolveEdges keyword-matches, and a zero-match claim falls back to ALL numeric facts", () => {
     const facts = catalogFacts(content);
     const claims = extractClaims(content);
