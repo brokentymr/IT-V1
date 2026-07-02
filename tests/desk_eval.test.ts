@@ -47,6 +47,12 @@ describe("detectTrueDataRejection", () => {
     };
     expect(detectTrueDataRejection(affirming).rejected).toBe(false);
   });
+  it("does not fire on the desk PROACTIVELY REFUTING the data-error hypothesis (real regen case)", () => {
+    const refuting: EvalContent = {
+      research: { panel: [{ lens: "risk", claims: [{ statement: "Micron's reported Q3 FY2026 figures (84.6% gross margin) represent a genuine cyclical-plus-structural inflection and are not data errors; the prior-year XBRL trough makes the YoY percentages arithmetically valid.", grounded: true }] }] },
+    };
+    expect(detectTrueDataRejection(refuting).rejected).toBe(false);
+  });
 });
 
 describe("groundednessScore + decisionCompleteness + coherenceState", () => {

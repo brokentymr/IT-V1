@@ -50,7 +50,11 @@ const REJECTION_PHRASES = [
 
 // If the same text AFFIRMS the data is real, a rejection phrase in it is being REFUTED, not asserted —
 // don't flag it (fixes the false positive on "...are real and are explained by...not a data artifact").
-const AFFIRMING_PHRASES = ["are real", "is real", "are genuine", "is genuine", "reflect genuine", "not a data error", "not an artifact", "not a bug", "not a data artifact", "rather than accounting anomaly", "rather than an artifact"];
+const AFFIRMING_PHRASES = [
+  "are real", "is real", "genuine", "reflect genuine", "arithmetically valid", "print is real",
+  "not data error", "not a data error", "not an error", "not an artifact", "not a bug",
+  "not a data artifact", "rather than accounting anomaly", "rather than an artifact",
+];
 
 export function detectTrueDataRejection(c: EvalContent): { rejected: boolean; hits: string[] } {
   const texts: string[] = [];
