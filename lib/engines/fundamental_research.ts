@@ -35,7 +35,7 @@ import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_inter
 import { detectSurprises, surpriseBriefing, type Observation } from "./surprise";
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
-import { fetchTranscript, fetchMarketData, externalBlock } from "./external_evidence";
+import { fetchTranscript, fetchMarketData, fetchEventTranscript, externalBlock } from "./external_evidence";
 import { resolveTranscriptSource, transcriptEvidenceBlock, type TranscriptSource } from "../sources/transcript";
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
@@ -517,6 +517,8 @@ export async function runCoveragePass(opts: {
   if (opts.perplexity) {
     const ext = externalBlock([
       transcriptMeta ? null : await fetchTranscript(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker }),
+      // Best-effort analyst-day / product-event coverage (owner: free IR+web). Episodic — often null.
+      await fetchEventTranscript(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker }),
       await fetchMarketData(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector }),
     ]);
     if (ext) evidenceForDesk = `${evidenceForDesk}\n\n${ext}`;

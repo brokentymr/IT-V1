@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { externalBlock, fetchTranscript, fetchMarketData, type AskText } from "../lib/engines/external_evidence";
+import { externalBlock, fetchTranscript, fetchMarketData, fetchEventTranscript, type AskText } from "../lib/engines/external_evidence";
 
 describe("externalBlock", () => {
   it("assembles labeled sourced items and skips nulls/empties", () => {
@@ -26,5 +26,11 @@ describe("fetch helpers", () => {
   });
   it("fetchMarketData returns a labeled item on success", async () => {
     expect((await fetchMarketData(ok, { legal_name: "Micron", ticker: "MU", gics_sector: "IT" }))?.label).toMatch(/market/i);
+  });
+  it("fetchEventTranscript returns a best-effort labeled item, or null when there was no event", async () => {
+    const event: AskText = { async askText() { return { ok: true, text: "Apple WWDC 2026 (June): management outlined the roadmap and reaffirmed Services growth targets." }; } };
+    const none: AskText = { async askText() { return { ok: true, text: "none" }; } };
+    expect((await fetchEventTranscript(event, { legal_name: "Apple", ticker: "AAPL" }))?.label).toMatch(/analyst-day|product-event|best-effort/i);
+    expect(await fetchEventTranscript(none, { legal_name: "Apple", ticker: "AAPL" })).toBeNull();
   });
 });

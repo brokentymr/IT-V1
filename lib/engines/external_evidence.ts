@@ -36,6 +36,26 @@ Give exact figures, dates, and who said them (CEO/CFO). Quote where possible. Ci
   return a?.ok && a.text ? { label: "Earnings-call: guidance, committed-volume & narrative (transcript — sourced, cite as 'transcript')", text: a.text } : null;
 }
 
+/**
+ * Best-effort analyst-day / product-event coverage (owner decision 2026-07-02: "best-effort free IR+web").
+ * No cheap event-transcript API exists (only enterprise providers like FactSet cover product events), so
+ * this uses Perplexity to LOCATE the most recent non-earnings event and retrieve management's forward
+ * statements WITH source URLs — lower fidelity than a filed/verbatim transcript, and labeled as such so
+ * the desk weights it accordingly. Returns null when there was no such event.
+ */
+export async function fetchEventTranscript(perplexity: AskText, company: { legal_name: string; ticker: string | null }): Promise<ExternalEvidence | null> {
+  const a = await perplexity
+    .askText({
+      question: `Has ${company.legal_name} (${company.ticker ?? "n/a"}) held a major NON-earnings event in the last ~6 months — an analyst/investor day, or a product event (a keynote/launch like Apple's WWDC)? If YES: name the event and its date, link the official transcript or prepared-remarks URL if one exists, and report management's FORWARD-LOOKING statements — product roadmap, strategic or committed initiatives, and any medium-term financial targets / segment guidance — with exact figures and citations. If there was no such event, answer exactly "none".`,
+      maxTokens: 800,
+      purpose: "research.event_transcript",
+    })
+    .catch(() => null);
+  const text = a?.ok ? (a.text ?? "").trim() : "";
+  if (!text || /^none\b/i.test(text)) return null;
+  return { label: "Analyst-day / product-event forward statements (best-effort — Perplexity+IR; cite the linked source, lower fidelity than a filed transcript)", text };
+}
+
 /** W7 — third-party market/pricing data: ASP trends and market share from TrendForce/Gartner/IDC-type sources. */
 export async function fetchMarketData(perplexity: AskText, company: { legal_name: string; ticker: string | null; gics_sector: string | null }): Promise<ExternalEvidence | null> {
   const a = await perplexity
