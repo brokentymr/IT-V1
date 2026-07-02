@@ -5,6 +5,8 @@ import { runCoverage, runProfile, setAnalytics, setContent, approveThesis, vetoT
 import { generateContentAction } from "../../content-actions";
 import CompanyChat from "./CompanyChat";
 import DeleteCompany from "../../DeleteCompany";
+import { BASIS_CONFIG } from "../../../lib/config/fundamentals";
+import { ENTITY_GATE } from "../../../lib/config/entity_gate";
 
 export const dynamic = "force-dynamic";
 
@@ -17,15 +19,28 @@ const dirTag = (d: string) => (d === "up" ? "good" : d === "down" ? "bad" : "");
 const STANCE_LABEL: Record<string, string> = { strong_long: "Strong Long", constructive: "Constructive", neutral: "Neutral", cautious: "Cautious", avoid: "Avoid" };
 const stanceTone = (s: string) => (s === "strong_long" || s === "constructive" ? "good" : s === "avoid" || s === "cautious" ? "bad" : "");
 const dirWord = (d?: string) => (d === "positive" ? "▲" : d === "negative" ? "▼" : d === "mixed" ? "◆" : "•");
+// Control P11: display the reporting basis of a figure (GAAP / non-GAAP / Adjusted / Unadjusted).
+const basisLabel = (b?: string) => BASIS_CONFIG.displayLabels[(b ?? "gaap") as keyof typeof BASIS_CONFIG.displayLabels] ?? b ?? "GAAP";
 
 interface Band { p10: number; p50: number; p90: number }
 interface Profile { description?: string; founded?: string | null; headquarters?: string | null; total_funding?: string | null; last_valuation?: string | null; key_investors?: string[]; competitors?: string[]; recent?: string | null }
 interface SnapContent {
   profile?: Profile;
-  fundamentals?: { model?: { fiscal_period?: string; line_items?: Record<string, { label: string; value: number; unit: string; yoy?: { change_pct: number } | null }>; ratios?: Record<string, number> } };
+  fundamentals?: { model?: { fiscal_period?: string; line_items?: Record<string, { label: string; value: number; unit: string; basis?: string; yoy?: { change_pct: number } | null }>; ratios?: Record<string, number> } };
+  basis?: {
+    line_item_basis?: Record<string, string>;
+    fcf_bridge?: { ocf: number; capex: number; fcf: number } | null;
+    reconciliations?: Array<{ metric: string; gaap_value: number; non_gaap_value: number; delta: number; gaap_label: string; non_gaap_label: string }>;
+    unlabeled_flags?: string[];
+  };
   scenario?: { target_period?: string | null; bands?: { revenue?: Band; net_income?: Band; eps?: Band }; beat_probability?: { revenue: number | null; eps: number | null }; sensitivity?: Array<{ driver: string; metric: string; contribution: number }>; watch_items?: string[] };
   market_context?: { consensus?: Record<string, unknown> | null; analyst_view?: Record<string, unknown> | null };
-  thesis?: { one_liner?: string; long_form?: string; tensions?: string[]; invalidation_triggers?: string[]; conviction?: number };
+  thesis?: {
+    one_liner?: string; long_form?: string; tensions?: string[]; invalidation_triggers?: string[]; conviction?: number;
+    // Control P10: typed risks & triggers as one joined system.
+    risks?: Array<{ id: string; title: string; mechanism: string; quantified_impact: string | null; severity: string; linked_trigger_id: string | null }>;
+    triggers?: Array<{ id: string; condition: string; disclosure: string; source_ref: string | null }>;
+  };
   hypotheses?: { drivers?: Array<{ name: string; metric: string; direction: string; framing: string; impact_pct: { bear: number; base: number; bull: number } }> };
   research?: {
     panel?: Array<{ lens: string; summary: string; key_points?: string[]; risks?: string[]; confidence: number }>;
@@ -40,6 +55,10 @@ interface SnapContent {
     expected_return_pct?: number | null; risk_reward?: string; horizon?: string; sizing_guidance?: string;
     catalysts?: Array<{ event: string; date: string | null; expected_direction?: string; why?: string }>;
     invalidation_triggers?: string[];
+    // Control P12: positioning readout merged onto the decision.
+    implied_assumptions?: string[];
+    fair_value?: { low: number | null; base: number | null; high: number | null; multiple: number | null; basis: string; consistent_with_lean: boolean; reconciliation: string } | null;
+    action_rules?: Array<{ trigger: string; rule: string }>;
   };
   key_debates?: Array<{ question: string; bull?: string; bear?: string; lean?: string }>;
   levers?: {
@@ -55,6 +74,12 @@ interface SnapContent {
     demand_signals?: string;
     supply_constraints?: string;
   };
+  // Control P5: per-filing-type disclosure coverage scorer.
+  coverage_scorecard?: {
+    form_type?: string; ok?: boolean; score?: number; covered?: string[];
+    gaps?: Array<{ key: string; label: string; severity: string; detail: string; disclosed_but_missing?: boolean }>;
+    percentage_flags?: Array<{ claim: string; detail: string }>;
+  };
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
@@ -63,7 +88,7 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
   const { content_error } = await searchParams;
   const d = await getCompanyDetail(id);
   if (!d) notFound();
-  const { header: h, latest, approval, relationships, feed, signals, areas, sentiment } = d;
+  const { header: h, latest, approval, relationships, external_relationships, feed, signals, areas, sentiment, feed_filtered_count } = d;
   const content = (latest?.content ?? {}) as SnapContent;
   const diff = (latest?.diff ?? {}) as Diff;
   const sc = content.scenario;
@@ -116,6 +141,32 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
             <p style={{ marginTop: ".6rem", marginBottom: 0, fontSize: ".95rem" }}>
               <span className="faint">Variant view: </span>{p.variant_view}
             </p>
+            {/* Control P12: positioning readout — illustrative fair value + what spot is already pricing. */}
+            {p.fair_value && (p.fair_value.base != null) ? (
+              <div style={{ marginTop: ".5rem", fontSize: ".9rem" }}>
+                <div className="row" style={{ gap: ".6rem", flexWrap: "wrap", alignItems: "baseline" }}>
+                  <span className="mono"><span className="faint">Fair value </span>{p.fair_value.low ?? "—"} · <b>{p.fair_value.base}</b> · {p.fair_value.high ?? "—"}</span>
+                  {p.fair_value.multiple != null ? <span className="mono faint">{p.fair_value.multiple}×</span> : null}
+                  {p.fair_value.consistent_with_lean === false ? <span className="tag bad">lean vs spread conflict</span> : null}
+                </div>
+                {p.fair_value.reconciliation ? <div className="faint" style={{ fontSize: ".78rem", marginTop: ".2rem" }}>{p.fair_value.reconciliation}</div> : null}
+                <p className="faint" style={{ fontSize: ".7rem", margin: ".2rem 0 0" }}>{p.fair_value.basis}</p>
+              </div>
+            ) : null}
+            {p.implied_assumptions?.length ? (
+              <div style={{ marginTop: ".4rem" }}>
+                <span className="faint" style={{ fontSize: ".78rem" }}>What spot is pricing: </span>
+                <ul className="list-tight muted" style={{ fontSize: ".82rem", marginTop: ".15rem" }}>{p.implied_assumptions.map((a, i) => <li key={i}>{a}</li>)}</ul>
+              </div>
+            ) : null}
+            {p.action_rules?.length ? (
+              <details style={{ marginTop: ".4rem" }}>
+                <summary className="faint" style={{ fontSize: ".78rem", cursor: "pointer" }}>Action rules ({p.action_rules.length})</summary>
+                <ul className="list-tight muted" style={{ fontSize: ".82rem", marginTop: ".2rem" }}>
+                  {p.action_rules.map((r, i) => <li key={i}><span className="faint">If </span>{r.trigger}<span className="faint"> → </span>{r.rule}</li>)}
+                </ul>
+              </details>
+            ) : null}
             {p.catalysts?.length ? (
               <div style={{ marginTop: ".5rem" }}>
                 <span className="faint" style={{ fontSize: ".78rem" }}>Catalysts: </span>
@@ -247,6 +298,20 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
             {thesis?.long_form ? <p className="muted" style={{ whiteSpace: "pre-wrap" }}>{thesis.long_form}</p> : null}
             {thesis?.tensions?.length ? <><h3>Tensions</h3><ul className="list-tight muted">{thesis.tensions.map((t, i) => <li key={i}>{t}</li>)}</ul></> : null}
             {thesis?.invalidation_triggers?.length ? <><h3>Invalidation triggers</h3><ul className="list-tight muted">{thesis.invalidation_triggers.map((t, i) => <li key={i}>{t}</li>)}</ul></> : null}
+            {/* Control P10: typed risks joined to their triggers (mechanism + severity + confirming disclosure). */}
+            {thesis?.risks?.length ? (
+              <><h3>Risks</h3><ul className="list-tight muted">{thesis.risks.map((r) => {
+                const trig = r.linked_trigger_id ? thesis.triggers?.find((t) => t.id === r.linked_trigger_id) : undefined;
+                return (
+                  <li key={r.id}>
+                    <span className={`tag ${r.severity === "high" ? "bad" : r.severity === "medium" ? "accent" : ""}`}>{r.severity}</span> {r.title}
+                    {r.mechanism ? <span className="faint"> — {r.mechanism}</span> : null}
+                    {r.quantified_impact ? <span className="mono faint"> ({r.quantified_impact})</span> : null}
+                    {trig ? <div className="faint" style={{ fontSize: ".78rem" }}>Trigger: {trig.condition}{trig.disclosure ? ` — ${trig.disclosure}` : ""}</div> : null}
+                  </li>
+                );
+              })}</ul></>
+            ) : null}
             {latest ? (
               <div style={{ marginTop: ".8rem", borderTop: "1px solid var(--border)", paddingTop: ".8rem" }}>
                 {approval ? (
@@ -342,8 +407,13 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                       {b.net_cash != null ? <span className="mono">{b.net_cash >= 0 ? "net cash " : "net debt "}{bn(Math.abs(b.net_cash))}</span> : null}
                       {b.interest_coverage != null ? <span className="mono"><span className="faint">int. cov </span>{xx(b.interest_coverage)}</span> : null}
                       {b.cash_conversion != null ? <span className="mono"><span className="faint">cash conv </span>{xx(b.cash_conversion)}</span> : null}
-                      {b.free_cash_flow != null ? <span className="mono"><span className="faint">FCF </span>{bn(b.free_cash_flow)}</span> : null}
+                      {b.free_cash_flow != null ? <span className="mono"><span className="faint">FCF </span>{bn(b.free_cash_flow)} <span className="tag faint" style={{ fontSize: ".68rem" }}>Adjusted</span></span> : null}
                     </div>
+                    {content.basis?.fcf_bridge ? (
+                      <p className="faint" style={{ fontSize: ".72rem", marginTop: ".3rem" }}>
+                        FCF bridge (adjusted — company definition): OCF {bn(content.basis.fcf_bridge.ocf)} − capex {bn(content.basis.fcf_bridge.capex)} = {bn(content.basis.fcf_bridge.fcf)}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {L.working_capital && L.working_capital.ccc != null ? (
@@ -353,6 +423,73 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                   </div>
                 ) : null}
                 <p className="faint" style={{ fontSize: ".72rem", marginTop: ".4rem" }}>Computed from XBRL — citable to the filing.</p>
+              </div>
+            );
+          })() : null}
+
+          {/* Reported basis / reconciliation (control P11 — GAAP vs non-GAAP, and unlabeled-figure flags). */}
+          {content.basis && (content.basis.reconciliations?.length || content.basis.unlabeled_flags?.length) ? (() => {
+            const bx = content.basis!;
+            const fmtV = (metric: string, v: number) => (metric.includes("margin") ? pctf(v) : metric.includes("eps") ? v.toFixed(2) : fmtB(v));
+            return (
+              <div className="panel">
+                <h2 style={{ marginTop: 0 }}>Reported basis &amp; reconciliation</h2>
+                {bx.reconciliations?.length ? (
+                  <table>
+                    <thead><tr><th>Metric</th><th>GAAP</th><th>Non-GAAP</th><th>Δ</th></tr></thead>
+                    <tbody>
+                      {bx.reconciliations.map((r, i) => (
+                        <tr key={i}>
+                          <td>{r.metric.replace(/_/g, " ")}</td>
+                          <td className="mono"><span className="faint">{r.gaap_label} </span>{fmtV(r.metric, r.gaap_value)}</td>
+                          <td className="mono"><span className="faint">{r.non_gaap_label} </span>{fmtV(r.metric, r.non_gaap_value)}</td>
+                          <td className="mono">{r.delta >= 0 ? "+" : ""}{fmtV(r.metric, r.delta)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : null}
+                {bx.unlabeled_flags?.length ? (
+                  <div style={{ marginTop: ".5rem" }}>
+                    <span className="tag bad">unlabeled basis</span>
+                    <ul className="list-tight muted" style={{ fontSize: ".82rem", marginTop: ".3rem" }}>{bx.unlabeled_flags.map((f, i) => <li key={i}>{f}</li>)}</ul>
+                  </div>
+                ) : null}
+                <p className="faint" style={{ fontSize: ".72rem" }}>Basis labeling — GAAP figures never conflated with non-GAAP/adjusted.</p>
+              </div>
+            );
+          })() : null}
+
+          {/* Disclosure coverage (control P5 — which expected disclosures are covered vs gapped). */}
+          {content.coverage_scorecard && (content.coverage_scorecard.gaps?.length || content.coverage_scorecard.percentage_flags?.length || content.coverage_scorecard.covered?.length) ? (() => {
+            const cs = content.coverage_scorecard!;
+            return (
+              <div className="panel">
+                <div className="spread">
+                  <h2 style={{ marginTop: 0 }}>Disclosure coverage</h2>
+                  <span className={`tag ${cs.ok === false ? "bad" : "good"}`}>
+                    {cs.ok === false ? "gap hold" : "covered"}{cs.score != null ? ` · ${(cs.score * 100).toFixed(0)}%` : ""}
+                  </span>
+                </div>
+                {cs.covered?.length ? (
+                  <p className="muted" style={{ fontSize: ".82rem" }}><span className="faint">Covered: </span>{cs.covered.join(", ")}</p>
+                ) : null}
+                {cs.gaps?.length ? (
+                  <ul className="list-tight muted" style={{ fontSize: ".82rem", marginTop: ".3rem" }}>
+                    {cs.gaps.map((g, i) => (
+                      <li key={i}>
+                        <span className={`tag ${g.severity === "critical" ? "bad" : "warn"}`}>{g.severity}</span>{" "}
+                        {g.detail}{g.disclosed_but_missing ? " (disclosed but not captured)" : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {cs.percentage_flags?.length ? (
+                  <div style={{ marginTop: ".4rem" }}>
+                    <span className="tag warn">%-claim flags</span>
+                    <ul className="list-tight muted" style={{ fontSize: ".8rem", marginTop: ".3rem" }}>{cs.percentage_flags.map((f, i) => <li key={i}>{f.claim} — {f.detail}</li>)}</ul>
+                  </div>
+                ) : null}
               </div>
             );
           })() : null}
@@ -410,14 +547,16 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
             <div className="panel">
               <div className="spread"><h2>Fundamentals</h2><span className="faint">{content.fundamentals.model.fiscal_period}</span></div>
               <table>
-                <thead><tr><th>Line item</th><th>Value</th><th>YoY</th><th>Δ vs prior snapshot</th></tr></thead>
+                <thead><tr><th>Line item</th><th>Value</th><th>Basis</th><th>YoY</th><th>Δ vs prior snapshot</th></tr></thead>
                 <tbody>
-                  {Object.values(content.fundamentals.model.line_items).map((li) => {
+                  {Object.entries(content.fundamentals.model.line_items).map(([key, li]) => {
                     const dm = diff.metrics?.find((m) => m.label === li.label);
+                    const bl = basisLabel(content.basis?.line_item_basis?.[key] ?? li.basis);
                     return (
                       <tr key={li.label}>
                         <td>{li.label}</td>
                         <td className="mono">{li.unit === "USD/shares" ? li.value.toFixed(2) : fmtB(li.value)}</td>
+                        <td><span className="tag faint" style={{ fontSize: ".72rem" }}>{bl}</span></td>
                         <td className="mono muted">{li.yoy ? pctf(li.yoy.change_pct) : "—"}</td>
                         <td>{dm && dm.change_pct != null ? <span className={`tag ${dirTag(dm.direction)}`}>{dm.direction} {pctf(dm.change_pct)}</span> : <span className="faint">—</span>}</td>
                       </tr>
@@ -425,7 +564,7 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                   })}
                 </tbody>
               </table>
-              {content.fundamentals.model.ratios ? <p className="muted" style={{ fontSize: ".88rem" }}>Margins: {Object.entries(content.fundamentals.model.ratios).map(([k, v]) => `${k.replace("_", " ")} ${pctf(v)}`).join(" · ")}</p> : null}
+              {content.fundamentals.model.ratios ? <p className="muted" style={{ fontSize: ".88rem" }}>Margins <span className="faint">(GAAP)</span>: {Object.entries(content.fundamentals.model.ratios).map(([k, v]) => `${k.replace("_", " ")} ${pctf(v)}`).join(" · ")}</p> : null}
             </div>
           ) : null}
 
@@ -480,6 +619,27 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
               <select name="type">{LINK_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select>
               <button className="ghost" type="submit">+ Add link</button>
             </form>
+
+            {/* Control P12: read-through counterparties — named in the filing but not (yet) in our universe. */}
+            {external_relationships.length ? (
+              <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: ".7rem" }}>
+                <h3 style={{ marginTop: 0 }}>Read-through counterparties <span className="faint" style={{ fontWeight: 400, fontSize: ".8rem" }}>(not yet covered)</span></h3>
+                <table>
+                  <thead><tr><th>Counterparty</th><th>Type</th><th>Materiality</th><th>Read-through</th></tr></thead>
+                  <tbody>
+                    {external_relationships.map((r) => (
+                      <tr key={r.id}>
+                        <td>{r.to_company_id ? <a href={`/company/${r.to_company_id}`}>{r.to_ticker ?? r.to_name ?? r.counterparty_name}</a> : (r.counterparty_name + (r.ticker ? ` (${r.ticker})` : ""))}</td>
+                        <td className="muted">{r.type ?? "—"}</td>
+                        <td>{r.materiality ? <span className={`tag ${r.materiality === "high" ? "bad" : r.materiality === "medium" ? "warn" : ""}`}>{r.materiality}</span> : <span className="faint">—</span>}</td>
+                        <td className="muted" style={{ fontSize: ".82rem" }}>{r.read_through || r.rationale || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="faint" style={{ fontSize: ".72rem" }}>Surfaced from the filing text — customers, suppliers and partners we don&apos;t cover directly.</p>
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -507,7 +667,7 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                     <tr key={p.platform}>
                       <td>{p.platform}{p.top_themes?.length ? <div className="faint" style={{ fontSize: ".72rem" }}>{p.top_themes.join(" · ")}</div> : null}</td>
                       <td className="mono">{p.volume}</td>
-                      <td><span className={`tag ${p.sentiment > 0.15 ? "good" : p.sentiment < -0.15 ? "bad" : ""}`}>{p.sentiment > 0 ? "+" : ""}{p.sentiment.toFixed(2)}</span></td>
+                      <td>{p.low_volume ? <span className="faint" style={{ fontSize: ".72rem" }}>{p.net_display}</span> : <span className={`tag ${p.sentiment > 0.15 ? "good" : p.sentiment < -0.15 ? "bad" : ""}`}>{p.net_display ?? `${p.sentiment > 0 ? "+" : ""}${p.sentiment.toFixed(2)}`}</span>}</td>
                       <td className="muted">{p.trend}</td>
                     </tr>
                   ))}
@@ -541,6 +701,16 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
               ))}
               {feed.length === 0 && <p className="faint">No notes yet.</p>}
             </div>
+            {feed_filtered_count > 0 ? (
+              <details style={{ marginTop: ".5rem" }}>
+                <summary className="faint" style={{ fontSize: ".72rem", cursor: "pointer" }}>
+                  {feed_filtered_count} low-importance item{feed_filtered_count === 1 ? "" : "s"} filtered
+                </summary>
+                <div className="faint" style={{ fontSize: ".72rem", marginTop: ".3rem" }}>
+                  Uncategorized notes below importance {ENTITY_GATE.otherCategoryImportanceFloor} are hidden to keep the feed signal-dense.
+                </div>
+              </details>
+            ) : null}
           </div>
 
           {signals.length ? (

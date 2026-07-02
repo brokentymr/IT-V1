@@ -8,6 +8,7 @@ import { getCompanyDetail } from "./company";
 import { latestOnboarding } from "../engines/onboarding";
 import { consumerStatus, gapPlain } from "./status";
 import { EDUCATION_BADGE, positionsLine } from "../content/disclosure";
+import { BASIS_CONFIG } from "../config/fundamentals";
 
 export interface Card { kind: string; title: string; headline: string; bullets: string[]; color: "neutral" | "bull" | "bear" | "warn" | "info"; metric: { value: string; label: string } | null }
 
@@ -39,11 +40,17 @@ export async function buildConsumerView(companyId: string): Promise<ConsumerView
   const building = h.coverage_status === "in_research" || (onboard?.status === "running");
 
   const content = (d.latest?.content ?? {}) as {
-    thesis?: { one_liner?: string; tensions?: string[]; invalidation_triggers?: string[] };
-    fundamentals?: { model?: { line_items?: Record<string, { label: string; value: number; unit: string; yoy?: { change_pct: number } | null }> } };
+    thesis?: { one_liner?: string; tensions?: string[]; invalidation_triggers?: string[]; risks?: Array<{ title: string; severity?: string }> };
+    fundamentals?: { model?: { line_items?: Record<string, { label: string; value: number; unit: string; basis?: string; yoy?: { change_pct: number } | null }> } };
+    basis?: { line_item_basis?: Record<string, string> };
     scenario?: { beat_probability?: { revenue: number | null }; watch_items?: string[] };
     hypotheses?: { drivers?: Array<{ name: string; direction: string; framing: string }> };
     research?: { verification?: { confidence?: number } };
+    positioning?: {
+      strategic_stance?: string; variant_view?: string; is_consensus?: boolean;
+      fair_value?: { base?: number | null; multiple?: number | null } | null;
+      action_rules?: Array<{ trigger: string; rule: string }>;
+    };
   };
   const thesis = d.approval?.edited_thesis ? { ...content.thesis, ...(d.approval.edited_thesis as object) } as typeof content.thesis : content.thesis;
 
@@ -67,18 +74,29 @@ export async function buildConsumerView(companyId: string): Promise<ConsumerView
   if (showThesis) {
     if (thesis?.one_liner) cards.push({ kind: "one_liner", title: "The big idea", headline: thesis.one_liner, bullets: [], color: "info", metric: null });
 
-    const nums = Object.values(content.fundamentals?.model?.line_items ?? {}).slice(0, 4);
+    const lineItemBasis = content.basis?.line_item_basis ?? {};
+    // Control P11: label every reported figure with its basis so a non-GAAP number is never read as GAAP.
+    const basisTag = (key: string, li: { basis?: string }): string => {
+      const b = (lineItemBasis[key] ?? li.basis ?? "gaap") as keyof typeof BASIS_CONFIG.displayLabels;
+      return ` (${BASIS_CONFIG.displayLabels[b] ?? b})`;
+    };
+    const nums = Object.entries(content.fundamentals?.model?.line_items ?? {}).slice(0, 4);
     if (nums.length) {
-      const head = nums[0];
-      cards.push({ kind: "numbers", title: "The numbers that matter", headline: `${head.label} came in at ${head.unit === "USD/shares" ? head.value.toFixed(2) : b(head.value)}${head.yoy ? `, ${head.yoy.change_pct >= 0 ? "up" : "down"} ${Math.abs(head.yoy.change_pct * 100).toFixed(0)}% on last year` : ""}.`,
-        bullets: nums.slice(1).map((n) => `${n.label}: ${n.unit === "USD/shares" ? n.value.toFixed(2) : b(n.value)}${n.yoy ? ` (${n.yoy.change_pct >= 0 ? "+" : ""}${(n.yoy.change_pct * 100).toFixed(0)}% YoY)` : ""}`),
+      const [headKey, head] = nums[0];
+      cards.push({ kind: "numbers", title: "The numbers that matter", headline: `${head.label} came in at ${head.unit === "USD/shares" ? head.value.toFixed(2) : b(head.value)}${basisTag(headKey, head)}${head.yoy ? `, ${head.yoy.change_pct >= 0 ? "up" : "down"} ${Math.abs(head.yoy.change_pct * 100).toFixed(0)}% on last year` : ""}.`,
+        bullets: nums.slice(1).map(([k, n]) => `${n.label}: ${n.unit === "USD/shares" ? n.value.toFixed(2) : b(n.value)}${basisTag(k, n)}${n.yoy ? ` (${n.yoy.change_pct >= 0 ? "+" : ""}${(n.yoy.change_pct * 100).toFixed(0)}% YoY)` : ""}`),
         color: "neutral", metric: { value: head.unit === "USD/shares" ? head.value.toFixed(2) : b(head.value), label: head.label } });
     }
 
     const drivers = (content.hypotheses?.drivers ?? []).filter((dr) => dr.direction === "tailwind");
     if (drivers.length) cards.push({ kind: "right", title: "What could go right", headline: drivers[0].framing || drivers[0].name, bullets: drivers.slice(1, 4).map((dr) => dr.name), color: "bull", metric: null });
 
-    if (thesis?.tensions?.length || thesis?.invalidation_triggers?.length) {
+    // Control P10: prefer the typed risks[].title when present; keep the exact tensions/invalidation_triggers
+    // fallback for legacy snapshots that only carry string triggers.
+    const riskTitles = (thesis?.risks ?? []).map((r) => r.title).filter(Boolean);
+    if (riskTitles.length) {
+      cards.push({ kind: "wrong", title: "What could go wrong", headline: riskTitles[0], bullets: riskTitles.slice(1, 4), color: "bear", metric: null });
+    } else if (thesis?.tensions?.length || thesis?.invalidation_triggers?.length) {
       cards.push({ kind: "wrong", title: "What could go wrong", headline: thesis.tensions?.[0] ?? "Watch these risks", bullets: [...(thesis.tensions ?? []).slice(1, 3), ...(thesis.invalidation_triggers ?? []).slice(0, 2)], color: "bear", metric: null });
     }
 
@@ -89,6 +107,28 @@ export async function buildConsumerView(companyId: string): Promise<ConsumerView
 
     if (thesis?.invalidation_triggers?.length || h.rolling_outlook) {
       cards.push({ kind: "watching", title: "What we're watching", headline: h.rolling_outlook || thesis?.invalidation_triggers?.[0] || "The next report", bullets: (thesis?.invalidation_triggers ?? []).slice(0, 3), color: "warn", metric: null });
+    }
+
+    // Control P12: the call + an illustrative fair value (never a formal target).
+    const pos = content.positioning;
+    if (pos && (pos.variant_view || pos.strategic_stance)) {
+      const bullets: string[] = [];
+      if (pos.fair_value?.base != null) bullets.push(`Illustrative fair value ~$${pos.fair_value.base}${pos.fair_value.multiple != null ? ` (${pos.fair_value.multiple}× P50 EPS)` : ""}`);
+      if (pos.action_rules?.length) bullets.push(...pos.action_rules.slice(0, 2).map((r) => `If ${r.trigger}: ${r.rule}`));
+      const stanceColor = pos.strategic_stance === "strong_long" || pos.strategic_stance === "constructive" ? "bull"
+        : pos.strategic_stance === "avoid" || pos.strategic_stance === "cautious" ? "bear" : "info";
+      cards.push({ kind: "positioning", title: "Our call", headline: pos.variant_view || (pos.is_consensus ? "No differentiated edge — priced for the base case." : "Our read"), bullets, color: stanceColor as Card["color"], metric: null });
+    }
+
+    // Control P12: read-through relationships (who this connects to in the value chain).
+    const rels = d.external_relationships ?? [];
+    if (rels.length) {
+      cards.push({
+        kind: "relationships", title: "Who this connects to",
+        headline: `${rels.length} ${rels.length === 1 ? "company" : "companies"} in the value chain`,
+        bullets: rels.slice(0, 4).map((r) => `${r.counterparty_name}${r.type ? ` (${r.type})` : ""}${r.read_through ? ` — ${r.read_through}` : ""}`),
+        color: "info", metric: null,
+      });
     }
   }
 

@@ -14,6 +14,8 @@ import { bossQueue } from "../queue/boss";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
 import { accumulateArea } from "./areas_of_interest";
+import { entityGate } from "./news_filter";
+import { ENTITY_GATE } from "../config/entity_gate";
 
 const MONITORED_STATUSES = ["in_research", "in_review", "published", "monitoring"];
 
@@ -26,6 +28,8 @@ export interface MonitorResult {
   skipped_duplicates: number;
   areas_opened: number;
   areas_accumulated: number;
+  /** Control P8: headlines rejected by the entity gate for a collision-prone ticker (no LLM, no note). */
+  entity_gated: number;
 }
 
 interface CompanyRow {
@@ -33,6 +37,7 @@ interface CompanyRow {
   legal_name: string;
   primary_ticker: string;
   gics_sector: string | null;
+  markets: Array<{ exchange?: string | null }> | null;
 }
 
 export async function runDailyMonitor(opts: {
@@ -49,13 +54,13 @@ export async function runDailyMonitor(opts: {
   const maxArticles = opts.maxArticles ?? MONITOR_CONFIG.maxArticlesPerCompany;
   const result: MonitorResult = {
     companies: 0, articles_seen: 0, notes_created: 0, read_through_notes: 0, escalations: 0, skipped_duplicates: 0,
-    areas_opened: 0, areas_accumulated: 0,
+    areas_opened: 0, areas_accumulated: 0, entity_gated: 0,
   };
 
   const companies = await query<CompanyRow>(
     opts.companyIds?.length
-      ? "SELECT id, legal_name, primary_ticker, gics_sector FROM companies WHERE id = ANY($1)"
-      : "SELECT id, legal_name, primary_ticker, gics_sector FROM companies WHERE coverage_status = ANY($1)",
+      ? "SELECT id, legal_name, primary_ticker, gics_sector, markets FROM companies WHERE id = ANY($1)"
+      : "SELECT id, legal_name, primary_ticker, gics_sector, markets FROM companies WHERE coverage_status = ANY($1)",
     [opts.companyIds?.length ? opts.companyIds : MONITORED_STATUSES],
   );
 
@@ -81,12 +86,41 @@ export async function runDailyMonitor(opts: {
     );
     const seen = new Set(existing.rows.map((r) => (r.h ?? "").toLowerCase()));
 
+    // Control P8: for collision-prone tickers, load the learned denylist of offending phrases and the
+    // exchange facet so the entity gate can require distinctive company signals before we spend an LLM.
+    const exchange = company.markets?.find((m) => m.exchange)?.exchange ?? null;
+    const gateCompany = {
+      legalName: company.legal_name, ticker: company.primary_ticker, exchange, gicsSector: company.gics_sector,
+    };
+    const kc = await query<{ term: string }>(
+      "SELECT term FROM ticker_collisions WHERE ticker = $1", [company.primary_ticker],
+    );
+    const knownCollisionTerms = kc.rows.map((r) => r.term);
+
     let topOutlook: { score: number; outlook: string } | null = null;
 
     for (const article of articles) {
       const key = article.title.toLowerCase();
       if (seen.has(key)) { result.skipped_duplicates++; continue; }
       seen.add(key);
+
+      // Entity gate (control P8). Non-collision-prone tickers pass unconditionally (no-op). A collision-
+      // prone ticker whose headline lacks distinctive signals is dropped WITHOUT classification and the
+      // offending phrase is logged (idempotently bumping `hits`) for operator audit / denylist tuning.
+      const gate = entityGate(
+        { title: article.title, snippet: article.snippet }, gateCompany, knownCollisionTerms, ENTITY_GATE,
+      );
+      if (!gate.passed) {
+        result.entity_gated++;
+        const term = (gate.matchedTerm ?? article.title).toLowerCase().slice(0, 240);
+        await query(
+          `INSERT INTO ticker_collisions (ticker, company_id, term, headline)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (ticker, term) DO UPDATE SET hits = ticker_collisions.hits + 1, last_seen = now(), headline = EXCLUDED.headline`,
+          [company.primary_ticker, company.id, term, article.title],
+        ).catch((e) => console.warn("[monitor] collision log failed:", (e as Error).message));
+        continue;
+      }
 
       const a = await opts.analyzer.analyze({
         company: {

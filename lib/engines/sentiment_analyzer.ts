@@ -10,6 +10,10 @@ export interface SentimentAnalyzeInput {
   company: { legal_name: string; ticker: string };
   platforms: Array<{ platform: string; volume: number; sentiment: number; trend: string; samples: string[] }>;
   fundamentals: { thesis: string | null; conviction: number | null; recent_direction: string };
+  /** Control P7: every contributing platform is below the volume floor — forbid tempo/velocity claims. */
+  suppress_tempo?: boolean;
+  /** The velocity phrases (from config) the narrative must avoid when suppress_tempo is set. */
+  bannedPhrases?: string[];
 }
 
 export const Gap = z.object({
@@ -39,7 +43,11 @@ export class ClaudeSentimentAnalyzer implements SentimentAnalyzer {
       `### ${p.platform} — volume ${p.volume}, ${fmtSent(p.sentiment)}, trend ${p.trend}\n${p.samples.slice(0, 8).map((s) => `- ${s}`).join("\n") || "(no text samples)"}`,
     ).join("\n\n");
 
-    const prompt = `You are a market-sentiment analyst. Read the crowd across platforms, then compare it to the fundamentals.
+    const tempoGuard = input.suppress_tempo
+      ? `\n\nSTATISTICAL FLOOR (control P7): every platform is below the volume floor — the sample is too thin to claim any tempo. Describe the crowd in STATIC terms only. Do NOT claim momentum, acceleration, or velocity, and do NOT use words like: ${(input.bannedPhrases ?? []).join(", ")}. State that volume is insufficient to read a trend.`
+      : "";
+
+    const prompt = `You are a market-sentiment analyst. Read the crowd across platforms, then compare it to the fundamentals.${tempoGuard}
 
 Company: ${company.legal_name} (${company.ticker})
 Standing thesis: ${input.fundamentals.thesis ?? "(none)"}${input.fundamentals.conviction ? ` (conviction ${input.fundamentals.conviction}/5)` : ""}

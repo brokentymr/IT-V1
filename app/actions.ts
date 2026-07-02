@@ -14,6 +14,7 @@ import { JOB } from "../lib/queue/types";
 import { FUNDAMENTALS_CONFIG } from "../lib/config/fundamentals";
 import { CostCeilingError } from "../lib/llm/client";
 import { answerCompanyChat, recordDeepenTurn } from "../lib/engines/company_chat";
+import { retractClaim as retractClaimNode, retractFact as retractFactNode } from "../lib/engines/claim_dag";
 
 export async function addCompany(formData: FormData): Promise<void> {
   const ticker = String(formData.get("ticker") ?? "").trim().toUpperCase();
@@ -132,6 +133,33 @@ export async function vetoThesis(formData: FormData): Promise<void> {
   await query(`UPDATE companies SET coverage_status='in_review', coverage=jsonb_set(coverage,'{status}','"in_review"') WHERE id=$1`, [companyId]);
   revalidatePath(`/company/${companyId}`);
   revalidatePath(`/c/${companyId}`);
+}
+
+/** Control P4: operator retracts ONE claim (a single narrative statement) — flips it to 'retracted'. */
+export async function retractClaim(formData: FormData): Promise<void> {
+  const companyId = String(formData.get("company_id") ?? "");
+  const claimId = String(formData.get("claim_id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim() || "operator retraction";
+  if (!claimId) return;
+  await retractClaimNode(claimId, reason).catch(() => false);
+  if (companyId) {
+    revalidatePath(`/company/${companyId}`);
+    revalidatePath(`/c/${companyId}`);
+  }
+}
+
+/** Control P4: operator retracts a FACT — flips it to 'retracted' and stales every dependent claim. */
+export async function retractFact(formData: FormData): Promise<void> {
+  const companyId = String(formData.get("company_id") ?? "");
+  const snapshotId = String(formData.get("snapshot_id") ?? "");
+  const factKey = String(formData.get("fact_key") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim() || "operator retraction";
+  if (!snapshotId || !factKey) return;
+  await retractFactNode({ snapshotId, factKey, reason }).catch(() => 0);
+  if (companyId) {
+    revalidatePath(`/company/${companyId}`);
+    revalidatePath(`/c/${companyId}`);
+  }
 }
 
 /** Admin rollback: pull the published content pack from the consumer surface but keep the asset under

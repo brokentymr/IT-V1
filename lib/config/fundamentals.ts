@@ -68,3 +68,52 @@ export const FUNDAMENTALS_CONFIG: FundamentalsConfig = {
     { key: "accounts_payable", label: "Accounts payable", unit: "USD", kind: "stock", tags: ["AccountsPayableCurrent", "AccountsPayableTradeCurrent"] },
   ],
 };
+
+/**
+ * Basis labeling (control P11 — GAAP / non-GAAP / adjusted). Config-not-code: every reported figure
+ * is stamped with the reporting basis so a non-GAAP number can never be silently read as GAAP.
+ *   - defaultBasis: XBRL us-gaap line items are, by definition, GAAP.
+ *   - derivedBasis: figures WE derive that the company defines its own way (e.g. free cash flow =
+ *     operating cash flow − capex) carry the company-definition adjusted label, not GAAP.
+ *   - divergence tolerances: a GAAP vs non-GAAP figure is only reconciled (surfaced as a delta) when it
+ *     diverges beyond these floors — equal-within-tolerance pairs produce NO reconciliation row.
+ *   - displayLabels: how each basis reads in the UI / consumables.
+ */
+export interface BasisConfig {
+  defaultBasis: "gaap" | "non_gaap" | "adjusted" | "unadjusted";
+  derivedBasis: Record<string, { basis: "gaap" | "non_gaap" | "adjusted" | "unadjusted"; label: string }>;
+  epsDivergenceUsd: number;   // EPS GAAP vs non-GAAP divergence floor, in dollars/share
+  marginDivergencePp: number; // margin GAAP vs non-GAAP divergence floor, in percentage points
+  displayLabels: Record<"gaap" | "non_gaap" | "adjusted" | "unadjusted", string>;
+}
+
+export const BASIS_CONFIG: BasisConfig = {
+  defaultBasis: "gaap",
+  derivedBasis: {
+    free_cash_flow: { basis: "adjusted", label: "adjusted (company definition)" },
+  },
+  epsDivergenceUsd: 0.01,
+  marginDivergencePp: 0.1,
+  displayLabels: { gaap: "GAAP", non_gaap: "non-GAAP", adjusted: "Adjusted", unadjusted: "Unadjusted" },
+};
+
+/**
+ * P(beat) divergence floor (control P7). The Monte Carlo scenario emits a model-implied probability of
+ * beating consensus next quarter; the company's own trailing record emits a historical "beat rate" (the
+ * fraction of trailing quarters whose revenue grew YoY). When these diverge by more than `thresholdPts`
+ * percentage points we surface ONE sentence — explicitly a momentum PROXY, never a forecast — so a
+ * model that implies a near-certain beat against a company that has topped year-ago revenue only rarely
+ * (or vice-versa) is flagged rather than presented as settled. Config-not-code: both knobs are tunable.
+ *   - thresholdPts: minimum |model P(beat) − trailing beat rate|, in percentage points, to emit the note.
+ *   - minHistoryPeriods: minimum trailing YoY-growth observations required to trust the beat rate (below
+ *     this the rate is null and NO note is emitted — never fabricate a rate from too few quarters).
+ */
+export interface PbeatConfig {
+  thresholdPts: number;
+  minHistoryPeriods: number;
+}
+
+export const PBEAT_CONFIG: PbeatConfig = {
+  thresholdPts: 30,
+  minHistoryPeriods: 4,
+};

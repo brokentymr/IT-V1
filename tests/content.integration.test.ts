@@ -91,6 +91,10 @@ describe("Content layer (Phase 8)", () => {
   it("generates the spider: deck (header→sections→footer) + newsletter + short-form, all sourced & disclosed", async () => {
     const r = await generateSpider(companyId, { deck: fakeDeck, newsletter: fakeNewsletter, shortform: fakeShort });
 
+    // control P9: an advisory dedup lint report always rides along
+    expect(r.lint).toBeDefined();
+    expect(Array.isArray(r.lint.findings)).toBe(true);
+
     const deck = (await getContentItem(r.deckId))!;
     const body = deck.body as Deck;
     expect(body.slides[0].section).toBe("header");
@@ -141,5 +145,30 @@ describe("Content layer (Phase 8)", () => {
     // everything shows in the library
     const lib = await listContent(companyId);
     expect(lib.map((x) => x.type).sort()).toEqual(["deck", "newsletter", "podcast", "shortform"]);
+  });
+
+  // Runs LAST: it generates a second spider (extra content rows), so it must not precede the library-count assertion above.
+  it("control P9: flags a number the builders over-repeat across the spider", async () => {
+    const dup = "$99.9B";
+    const dupDeck: DeckBuilder = {
+      async build(): Promise<DeckNarrative> {
+        return { slides: MIDDLE.map((section) => ({ section, title: `T:${section}`, headline: `${dup} everywhere`, bullets: [`b:${dup}`], metric: null, color: "neutral", visual: "list" })), glossary: [] };
+      },
+    };
+    const dupNl: NewsletterBuilder = {
+      async build(): Promise<NewsletterDraft> {
+        return { title: "AAA", opening: `Opening ${dup}.`, body: `Body ${dup} and again ${dup}.`, watching: `Watching ${dup}.`, embedded_slides: [], glossary: [] };
+      },
+    };
+    const dupSf: ShortFormBuilder = {
+      async build(): Promise<ShortFormPack> {
+        return { clips: [{ source_ref: "", hook: `Hook ${dup}`, point_in_one_breath: `Point ${dup}`, visual_idea: "chart", platform: ["shorts"], suggested_caption: "cap", on_screen_text: `text ${dup}`, disclosure_caption: "" }] };
+      },
+    };
+    const r = await generateSpider(companyId, { deck: dupDeck, newsletter: dupNl, shortform: dupSf });
+    expect(r.lint.flaggedCount).toBeGreaterThan(0);
+    const finding = r.lint.findings.find((f) => f.token === "$99.9b");
+    expect(finding).toBeDefined();
+    expect(finding!.count).toBeGreaterThan(2);
   });
 });

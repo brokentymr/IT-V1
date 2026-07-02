@@ -167,6 +167,11 @@ describe("Fundamental Research — coverage + forward (integration)", () => {
     expect(sc.beat_probability.revenue).toBeLessThanOrEqual(1);
     expect(sc.watch_items.length).toBeGreaterThan(0);
     expect(sc.sensitivity.length).toBe(2);
+    // Control P5: per-filing-type disclosure coverage scorecard is stamped; Apple fixture has revenue
+    // present and no RPO/backlog text → no critical gap → ok=true (keeps committed/needs_review unchanged).
+    expect(row.content.coverage_scorecard).toBeTruthy();
+    expect(row.content.coverage_scorecard.ok).toBe(true);
+    expect(row.content.coverage_scorecard.covered).toContain("revenue");
     // first snapshot has no prior → diff metrics are "new"
     expect(row.diff.metrics.find((m: { key: string }) => m.key === "revenue").direction).toBe("new");
 

@@ -83,8 +83,12 @@ describe("Engine 4 — Brand/Sentiment (Phase 7)", () => {
     expect(r.degraded.length).toBe(0);
     const st = r.by_platform.find((p) => p.platform === "stocktwits")!;
     expect(st.volume).toBe(3);                 // stale message excluded by window
-    expect(st.sentiment).toBeCloseTo(0.33, 1); // bull2 bear1
+    expect(st.sentiment).toBeCloseTo(0.33, 1); // bull2 bear1 — numeric preserved for back-compat
     expect(st.top_themes).toContain("theme-stocktwits");
+    // control P7: 3 samples is below the volume floor — trend + net display are suppressed, low_volume flagged
+    expect(st.low_volume).toBe(true);
+    expect(st.net_display).toBe("insufficient volume");
+    expect(st.trend).toBe("insufficient volume");
     expect(r.gap.direction).toBe("sentiment_ahead");
     expect(r.area_opened).toBe(true);
 
@@ -92,10 +96,28 @@ describe("Engine 4 — Brand/Sentiment (Phase 7)", () => {
     const cf = await db.pool.query<{ bs: { ground_momentum: string; sentiment_vs_fundamentals_gap: { magnitude: string }; confidence: number } }>(
       "SELECT current_events->'brand_sentiment' AS bs FROM canonical_files WHERE company_id=$1", [id.AAA],
     );
-    expect(cf.rows[0].bs.ground_momentum).toBe("Retail piling in.");
+    // control P7: every platform (st 3 / gdelt 20 / news 3) is below the floor → tempo language scrubbed
+    expect(cf.rows[0].bs.ground_momentum).toBe("Retail.");
     expect(cf.rows[0].bs.sentiment_vs_fundamentals_gap.magnitude).toBe("high");
     // the gap became a tracked area of interest
     expect((await loadOpenAreas(id.AAA)).some((a) => a.theme === "sentiment_gap")).toBe(true);
+  });
+
+  it("control P7: a high-volume platform keeps full 2-decimal precision and does NOT scrub tempo", async () => {
+    const cid = await mk("CCC");
+    const r = await runSentiment({
+      companyId: cid, now: NOW,
+      stocktwits: new StockTwitsAdapter(stFetcher(ST_MSGS)),                    // 3 msgs — below floor
+      gdelt: new GdeltToneAdapter(gdeltFetcher([{ bin: 6, count: 150 }])),      // volume 150, avg_tone 6 → 0.6
+      analyzer: fakeSentimentAnalyzer({ direction: "aligned", magnitude: "low", rationale: "ok" }),
+    });
+    const g = r.by_platform.find((p) => p.platform === "gdelt")!;
+    expect(g.volume).toBe(150);
+    expect(g.low_volume).toBe(false);
+    expect(g.net_display).toBe("0.60");        // full two-decimal net, not suppressed
+    expect(g.trend).toBe("flat");
+    // NOT every platform is below the floor (gdelt=150) → tempo language is preserved verbatim
+    expect(r.ground_momentum).toBe("Retail piling in.");
   });
 
   it("degrades gracefully: a dead platform lowers confidence and is flagged, never fails", async () => {
@@ -119,5 +141,27 @@ describe("Engine 4 — Brand/Sentiment (Phase 7)", () => {
     const sentimentJobs = queue.jobs.filter((j) => j.name === "sentiment-run").map((j) => (j.data as { company_id: string }).company_id);
     expect(sentimentJobs).toContain(id.AAA); // origin (major)
     expect(sentimentJobs).toContain(id.BBB); // major-band read-through neighbor
+  });
+
+  it("control P8: news scoring excludes low-importance 'other' notes (feed/scoring floor shared)", async () => {
+    const did = await mk("DDD");
+    // one suppressed 'other' note (score 10) and one scored 'guidance' note (score 50) in-window
+    await db.pool.query(
+      `INSERT INTO news_notes (company_id, detected_at, category, origin_kind, importance_score, status, content)
+       VALUES ($1,$2,'other','primary',10,'logged',$3)`,
+      [did, iso(1), JSON.stringify({ headline: "noise", impact_analysis: { thesis_effect: "supports" } })],
+    );
+    await db.pool.query(
+      `INSERT INTO news_notes (company_id, detected_at, category, origin_kind, importance_score, status, content)
+       VALUES ($1,$2,'guidance','primary',50,'flagged',$3)`,
+      [did, iso(1), JSON.stringify({ headline: "real", impact_analysis: { thesis_effect: "supports" } })],
+    );
+    const r = await runSentiment({
+      companyId: did, now: NOW,
+      stocktwits: new StockTwitsAdapter(fail404), gdelt: new GdeltToneAdapter(fail404),
+      analyzer: fakeSentimentAnalyzer({ direction: "aligned", magnitude: "low", rationale: "ok" }),
+    });
+    const newsSig = r.by_platform.find((p) => p.platform === "news")!;
+    expect(newsSig.volume).toBe(1); // the suppressed 'other' note is excluded from scoring
   });
 });

@@ -7,7 +7,7 @@
  * Hybrid bounding (owner decision 2026-06-30): the LLM proposes each driver's bear/base/bull, but a
  * sampled impact is clamped to ±boundSigma × the metric's historical σ — history keeps the model honest.
  */
-import type { Driver } from "../types";
+import type { Driver, WatchItem } from "../types";
 import type { Stats } from "./model";
 
 /** Deterministic PRNG (mulberry32) so scenarios are reproducible + tests are stable. */
@@ -80,11 +80,70 @@ export interface ScenarioOutput {
   };
   beat_probability: { revenue: number | null; eps: number | null };
   sensitivity: Array<{ driver: string; metric: Driver["metric"]; contribution: number }>;
+  watch: WatchItem[];
   watch_items: string[];
 }
 
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
 const usd = (x: number) => `$${(x / 1e9).toFixed(2)}B`;
+const eps$ = (x: number) => `$${x.toFixed(2)}`;
+
+type AffectedBand = WatchItem["affected_band"];
+
+/** Which OUTPUT band a driver's metric flows into. A margin driver moves net_margin, NEVER revenue. */
+function affectedBandFor(metric: Driver["metric"]): AffectedBand {
+  if (metric === "revenue") return "revenue";
+  if (metric === "net_income") return "net_income";
+  if (metric === "eps") return "eps";
+  return "net_margin"; // gross_margin / operating_margin / net_margin
+}
+
+const BAND_LABEL: Record<AffectedBand, string> = {
+  revenue: "revenue",
+  net_margin: "net margin",
+  net_income: "net income",
+  eps: "EPS",
+};
+
+/** Per-band value formatting: usd $B for revenue/net_income, $x.xx for eps, % for margins. */
+function fmtBand(bandKey: AffectedBand, value: number): string {
+  if (bandKey === "eps") return eps$(value);
+  if (bandKey === "net_margin") return pct(value);
+  return usd(value); // revenue, net_income
+}
+
+/**
+ * Pure, exported renderer of typed "what to watch" items. For each of the top-N sensitivity drivers it
+ * derives the affected OUTPUT band from the driver's metric, reads that band's P10 (bear) / P90 (bull),
+ * and formats per-band. If the driver's target band is missing (e.g. eps band when shares are unknown),
+ * the item is SKIPPED — never fabricated. `text` carries the plain-language string.
+ */
+export function computeWatchItems(
+  sensitivity: ScenarioOutput["sensitivity"],
+  drivers: Driver[],
+  bands: ScenarioOutput["bands"],
+  topN: number,
+): WatchItem[] {
+  const out: WatchItem[] = [];
+  for (const s of sensitivity.slice(0, topN)) {
+    const d = drivers.find((x) => x.name === s.driver);
+    if (!d) continue;
+    const affected_band = affectedBandFor(d.metric);
+    const targetBand = bands[affected_band];
+    if (!targetBand) continue; // missing band (eps optional) → skip, never fabricate
+    const bear_pts = Math.min(d.impact_pct.bear, d.impact_pct.bull);
+    const bull_pts = Math.max(d.impact_pct.bear, d.impact_pct.bull);
+    const bear_value = targetBand.p10; // invariant: bear → P10
+    const bull_value = targetBand.p90; // invariant: bull → P90
+    const metricLabel = d.metric.replace(/_/g, " ");
+    const text =
+      `${d.name} (${(s.contribution * 100).toFixed(0)}% of outcome variance): ${metricLabel} ` +
+      `bear ${bear_pts > 0 ? "+" : ""}${bear_pts}pts / bull ${bull_pts > 0 ? "+" : ""}${bull_pts}pts ` +
+      `moves ${BAND_LABEL[affected_band]} to ${fmtBand(affected_band, bear_value)} (P10) … ${fmtBand(affected_band, bull_value)} (P90).`;
+    out.push({ driver: d.name, metric: d.metric, affected_band, bear_pts, bull_pts, bear_value, bull_value, contribution: s.contribution, text });
+  }
+  return out;
+}
 
 /** Clamp a sampled impact (in percentage points) to ±boundSigma×σ when history supports it. */
 function bound(samplePts: number, sigmaPts: number, boundSigma: number, haveHistory: boolean): number {
@@ -139,24 +198,21 @@ export function simulateScenario(input: ScenarioInputs): ScenarioOutput {
     .map((c) => ({ driver: c.driver, metric: c.metric, contribution: c.raw / total }))
     .sort((a, b) => b.contribution - a.contribution);
 
-  const revBand = band(revenue);
-  const watch_items = sensitivity.slice(0, input.sensitivityTopN).map((s) => {
-    const d = input.drivers.find((x) => x.name === s.driver)!;
-    const unit = d.metric === "revenue" ? "revenue growth" : `${d.metric.replace("_", " ")}`;
-    return `${d.name} (${(s.contribution * 100).toFixed(0)}% of outcome variance): bear case ${d.impact_pct.bear > 0 ? "+" : ""}${d.impact_pct.bear}pts to ${unit} pulls revenue toward ${usd(revBand.p10)} (P10).`;
-  });
+  const bands: ScenarioOutput["bands"] = {
+    revenue: band(revenue), net_income: band(netIncome), revenue_growth: band(growth), net_margin: band(margin),
+    ...(eps.length ? { eps: band(eps) } : {}),
+  };
+  const watch = computeWatchItems(sensitivity, input.drivers, bands, input.sensitivityTopN);
+  const watch_items = watch.map((w) => w.text); // keep string[] so all downstream string consumers stay untouched
 
   return {
     target_period: input.target_period, base_period: input.base_period, runs: input.runs,
-    bands: {
-      revenue: revBand, net_income: band(netIncome), revenue_growth: band(growth), net_margin: band(margin),
-      ...(eps.length ? { eps: band(eps) } : {}),
-    },
+    bands,
     beat_probability: {
       revenue: input.consensus?.revenue_estimate_usd ? beatRev / input.runs : null,
       eps: input.consensus?.eps_estimate && input.shares ? beatEps / input.runs : null,
     },
-    sensitivity, watch_items,
+    sensitivity, watch, watch_items,
   };
 }
 

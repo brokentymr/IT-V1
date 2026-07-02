@@ -132,6 +132,24 @@ export function demandBriefing(d: DemandProfile): string {
   return parts.length ? `Demand & supply (from the filing — ground truth):\n${parts.map((p) => `- ${p}`).join("\n")}` : "";
 }
 
+// ---------- Non-GAAP reconciliation (control P11: basis labeling) ----------
+// The non-GAAP figures a filing discloses alongside GAAP (from its reconciliation table). Margins are
+// FRACTIONS (0..1) to align with model.ratios. Absent disclosures degrade to null — never fabricated.
+export const NonGaapReconciliation = z.object({
+  eps: z.number().nullable().default(null),            // non-GAAP diluted EPS, dollars/share
+  gross_margin: z.number().nullable().default(null),   // fraction 0..1
+  operating_margin: z.number().nullable().default(null),
+  net_margin: z.number().nullable().default(null),
+  label: z.string().default("non-GAAP (company adjusted)"),
+});
+export type NonGaapReconciliation = z.infer<typeof NonGaapReconciliation>;
+
+export interface NonGaapExtractInput {
+  company: { legal_name: string; ticker: string };
+  filing: { form: string };
+  text: string; // the non-GAAP reconciliation / adjusted-results excerpt from the filing
+}
+
 export interface FundamentalsAnalyst {
   frameForward(input: ForwardFrameInput): Promise<ForwardFrame>;
   draftThesis(input: ThesisDraftInput): Promise<ThesisDraft>;
@@ -139,6 +157,8 @@ export interface FundamentalsAnalyst {
   extractDrivers(input: DriverExtractInput): Promise<DriversResult>;
   /** Optional so existing fakes keep working; coverage skips the demand step when absent. */
   extractDemand?(input: DemandExtractInput): Promise<DemandProfile>;
+  /** Optional (control P11): pull the non-GAAP figures the filing reconciles to GAAP. Tests omit it. */
+  extractNonGaap?(input: NonGaapExtractInput): Promise<NonGaapReconciliation>;
 }
 
 function headline(model: FinancialModel): Record<string, number> {
@@ -253,5 +273,21 @@ Return JSON:
 Excerpt:
 ${input.text}`;
     return completeJSON({ prompt, schema: DemandProfile, model: "claude-sonnet-4-6", purpose: "fundamentals.demand", maxTokens: 2000 });
+  }
+
+  async extractNonGaap(input: NonGaapExtractInput): Promise<NonGaapReconciliation> {
+    const prompt = `Read this ${input.filing.form} excerpt for ${input.company.legal_name} (${input.company.ticker}) and extract the company's NON-GAAP (adjusted) figures where it reconciles them to GAAP.
+
+Extract ONLY figures the text states; do NOT invent or recompute. Leave a field null when the text does not disclose a non-GAAP value for it.
+- eps: non-GAAP / adjusted DILUTED earnings per share, in dollars per share.
+- gross_margin / operating_margin / net_margin: the non-GAAP / adjusted margin, expressed as a FRACTION (e.g. 42.5% → 0.425).
+- label: how the company names this basis (e.g. "non-GAAP", "Adjusted", "Adjusted (excluding stock-based compensation)").
+
+Return JSON:
+{"eps": number|null, "gross_margin": number|null, "operating_margin": number|null, "net_margin": number|null, "label": string}
+
+Excerpt:
+${input.text}`;
+    return completeJSON({ prompt, schema: NonGaapReconciliation, model: "claude-sonnet-4-6", purpose: "fundamentals.nongaap", maxTokens: 800 });
   }
 }

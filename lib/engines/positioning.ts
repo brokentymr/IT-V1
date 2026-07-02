@@ -26,6 +26,21 @@ export const PriceTarget = z.object({
 
 export const STANCES = ["strong_long", "constructive", "neutral", "cautious", "avoid"] as const;
 
+// Control P12: the deterministic positioning readout, merged onto the decision before it is written to
+// the snapshot. Optional/defaulted so a bare LLM decision (tests/positioning.test.ts) still parses.
+export const FairValue = z.object({
+  low: z.number().nullable().default(null),
+  base: z.number().nullable().default(null),
+  high: z.number().nullable().default(null),
+  multiple: z.number().nullable().default(null),
+  basis: z.string().default(""),
+  consistent_with_lean: z.boolean().default(true),
+  reconciliation: z.string().default(""),
+});
+export type FairValue = z.infer<typeof FairValue>;
+export const ActionRule = z.object({ trigger: z.string(), rule: z.string() });
+export type ActionRule = z.infer<typeof ActionRule>;
+
 export const PositioningDecision = z.object({
   strategic_stance: z.enum(STANCES),
   tactical_stance: z.string().default(""), // e.g. "trim into the print", "add on weakness", "wait for the catalyst"
@@ -41,6 +56,10 @@ export const PositioningDecision = z.object({
   sizing_guidance: z.string().default(""),
   catalysts: z.array(Catalyst).default([]),
   invalidation_triggers: z.array(z.string()).default([]),
+  // Control P12: readout (computed deterministically in the coverage pass, merged in after decide()).
+  implied_assumptions: z.array(z.string()).default([]),
+  fair_value: FairValue.nullable().default(null),
+  action_rules: z.array(ActionRule).default([]),
 });
 export type PositioningDecision = z.infer<typeof PositioningDecision>;
 

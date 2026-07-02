@@ -46,7 +46,7 @@ export function fakeResearchPanel(
         thesis: {
           one_liner: "Margin-led compounder", long_form: "Long.", actual_vs_expected: "Beat on revenue.",
           tensions: ["China demand"], key_debates: [{ question: "Is margin durable?", bull: "mix shift", bear: "cyclical", lean: "durable ~2 quarters" }],
-          invalidation_triggers: ["Net margin < 22% for two quarters"], conviction: 4, claims_to_verify: ["revenue grew"],
+          invalidation_triggers: ["Net margin < 22% for two quarters"], risks: [], triggers: [], conviction: 4, claims_to_verify: ["revenue grew"],
         },
         verification: {
           verdicts: [{ claim: "revenue grew", status: "supported", note: "XBRL confirms", citation: "XBRL: revenue YoY" }],

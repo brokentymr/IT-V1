@@ -4,6 +4,9 @@
  * relationships + the read-throughs that traveled them → current-events feed → signals → history.
  */
 import { query } from "../db/pool";
+import { snapshotClaimHealth } from "../engines/claim_dag";
+import { ENTITY_GATE } from "../config/entity_gate";
+import { loadReadThrough, type ReadThroughRelationship } from "../engines/read_through_relationships";
 
 export interface CompanyHeader {
   id: string;
@@ -85,7 +88,7 @@ export interface BrandSentiment {
   as_of?: string;
   trigger?: string;
   window_days?: number;
-  by_platform: Array<{ platform: string; volume: number; sentiment: number; trend: string; top_themes: string[] }>;
+  by_platform: Array<{ platform: string; volume: number; sentiment: number; trend: string; top_themes: string[]; net_display?: string; low_volume?: boolean }>;
   ground_momentum: string;
   sentiment_vs_fundamentals_gap: { direction: string; magnitude: string };
   gap_rationale?: string;
@@ -100,9 +103,15 @@ export interface CompanyDetail {
   snapshots: Array<{ snapshot_id: string; as_of: string; cycle_label: string; conviction: number | null }>;
   approval: { approved_at: string; approved_by: string; edited_thesis: unknown; note: string | null; status: string } | null;
   relationships: RelationshipRow[];
+  // Control P12: uncovered read-through counterparties (customers/suppliers/partners not in our universe).
+  external_relationships: ReadThroughRelationship[];
   feed: FeedNote[];
+  // Control P8: count of low-importance `other` notes suppressed from the feed (0 when nothing hidden).
+  feed_filtered_count: number;
   signals: Array<{ ts: string; kind: string; payload: Record<string, unknown> }>;
   areas: { open: AreaRow[]; resolved: AreaRow[] };
+  // Control P4: claim dependency DAG health for the latest snapshot (null for pre-P4/no-snapshot assets).
+  claim_health: { claims_fresh: number; claims_stale: number; claims_retracted: number; facts_active: number; facts_corrected: number; facts_retracted: number } | null;
 }
 
 export async function getCompanyDetail(id: string): Promise<CompanyDetail | null> {
@@ -154,13 +163,23 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     [id],
   );
 
+  // Control P8: hide low-importance `category='other'` chatter from the reader-facing feed. The floor is
+  // shared with sentiment scoring (ENTITY_GATE.otherCategoryImportanceFloor) so feed and scoring never diverge.
   const feed = await query<FeedNote>(
     `SELECT id, to_char(detected_at,'YYYY-MM-DD"T"HH24:MI:SS') AS detected_at,
             content->>'headline' AS headline, content->>'summary' AS summary, category,
             origin_kind, importance_score, status, origin_company_id
-       FROM news_notes WHERE company_id = $1 ORDER BY detected_at DESC LIMIT 30`,
-    [id],
+       FROM news_notes
+      WHERE company_id = $1 AND NOT (category = 'other' AND importance_score < $2)
+      ORDER BY detected_at DESC LIMIT 30`,
+    [id, ENTITY_GATE.otherCategoryImportanceFloor],
   );
+  const filtered = await query<{ n: number }>(
+    `SELECT COUNT(*) FILTER (WHERE category = 'other' AND importance_score < $2)::int AS n
+       FROM news_notes WHERE company_id = $1`,
+    [id, ENTITY_GATE.otherCategoryImportanceFloor],
+  );
+  const feed_filtered_count = filtered.rows[0]?.n ?? 0;
 
   const signals = await query<{ ts: string; kind: string; payload: Record<string, unknown> }>(
     `SELECT to_char(ts,'YYYY-MM-DD"T"HH24:MI:SS') AS ts, kind, payload
@@ -182,14 +201,21 @@ export async function getCompanyDetail(id: string): Promise<CompanyDetail | null
     [id],
   );
 
+  // Control P4: claim-DAG health for the latest snapshot (best-effort; null if there is no snapshot).
+  const claim_health = latest ? await snapshotClaimHealth(latest.snapshot_id).catch(() => null) : null;
+
+  // Control P12: read-through counterparties (uncovered names the filing surfaced).
+  const external_relationships = await loadReadThrough(id).catch(() => [] as ReadThroughRelationship[]);
+
   return {
     header, latest,
     sentiment: row.current_events?.brand_sentiment ?? null,
     snapshots: snaps.rows.map((s) => ({ snapshot_id: s.snapshot_id, as_of: s.as_of, cycle_label: s.cycle_label, conviction: s.conviction })),
-    approval, relationships: rels.rows, feed: feed.rows, signals: signals.rows,
+    approval, relationships: rels.rows, external_relationships, feed: feed.rows, feed_filtered_count, signals: signals.rows,
     areas: {
       open: areaRows.rows.filter((a) => a.status !== "resolved"),
       resolved: areaRows.rows.filter((a) => a.status === "resolved"),
     },
+    claim_health,
   };
 }

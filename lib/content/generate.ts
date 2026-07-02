@@ -8,12 +8,24 @@ import { assembleSubstance } from "./assemble";
 import { disclosureFooter } from "./disclosure";
 import { saveContentItem } from "./store";
 import { listEpisodeNotes, markNotesUsed } from "./notes";
+import { buildFactRegistry, renderRegistryBlock } from "./fact_registry";
+import { lintAssembledReport, type LintReport } from "./dedup_lint";
+import { CONTENT_LINT_CONFIG } from "../config/content";
 import { buildDeck, type Deck, type DeckBuilder } from "../engines/deck";
 import { buildNewsletter, type Newsletter, type NewsletterBuilder } from "../engines/newsletter";
 import { buildShortForm, type ShortFormPack, type ShortFormBuilder } from "../engines/shortform";
 import { buildEpisode, type PodcastScript, type EpisodeBuilder } from "../engines/podcast";
 
-export interface SpiderResult { deckId: string; newsletterId: string; shortformId: string; deck: Deck; newsletter: Newsletter; shortform: ShortFormPack }
+export interface SpiderResult { deckId: string; newsletterId: string; shortformId: string; deck: Deck; newsletter: Newsletter; shortform: ShortFormPack; lint: LintReport }
+
+/** Flatten a built deck to plain text for the dedup lint (titles + headlines + bullets + metrics). */
+function deckText(deck: Deck): string {
+  return [deck.title, deck.subtitle, ...deck.slides.flatMap((sl) => [sl.title, sl.headline, ...sl.bullets, sl.metric ? `${sl.metric.label} ${sl.metric.value} ${sl.metric.sub}` : ""])].join("\n");
+}
+/** Flatten a short-form pack to plain text for the dedup lint. */
+function shortFormText(pack: ShortFormPack): string {
+  return pack.clips.flatMap((c) => [c.hook, c.point_in_one_breath, c.visual_idea, c.suggested_caption, c.on_screen_text]).join("\n");
+}
 
 export async function generateSpider(companyId: string, deps: { deck?: DeckBuilder; newsletter?: NewsletterBuilder; shortform?: ShortFormBuilder } = {}, snapshotId?: string): Promise<SpiderResult> {
   const substance = await assembleSubstance(companyId, snapshotId); // throws NotApprovedError if the target snapshot isn't approved
@@ -22,17 +34,28 @@ export async function generateSpider(companyId: string, deps: { deck?: DeckBuild
 
   const t = substance.company.ticker ?? substance.company.legal_name;
 
+  // Control P9: materialize the canonical facts once and hand every ring a first-use/reference instruction.
+  const registry = buildFactRegistry(substance);
+  const registryBlock = renderRegistryBlock(registry);
+
   // Save each piece as it's built — a hiccup in a later format doesn't lose the earlier ones.
-  const deck = await buildDeck(substance, deps.deck);
+  const deck = await buildDeck(substance, deps.deck, registryBlock);
   const deckId = await saveContentItem({ companyId, snapshotId: substance.snapshot_id, type: "deck", title: deck.title, body: deck, provenance: prov, disclosure });
 
-  const newsletter = await buildNewsletter(substance, deck, deps.newsletter);
+  const newsletter = await buildNewsletter(substance, deck, deps.newsletter, registryBlock);
   const newsletterId = await saveContentItem({ companyId, snapshotId: substance.snapshot_id, type: "newsletter", title: newsletter.title, body: newsletter, provenance: prov, disclosure });
 
-  const shortform = await buildShortForm(substance, newsletter, deps.shortform);
+  const shortform = await buildShortForm(substance, newsletter, deps.shortform, registryBlock);
   const shortformId = await saveContentItem({ companyId, snapshotId: substance.snapshot_id, type: "shortform", title: `${t} — short-form pack`, body: shortform, provenance: prov, disclosure });
 
-  return { deckId, newsletterId, shortformId, deck, newsletter, shortform };
+  // Control P9: advisory dedup pass over the assembled spider (never throws — a flag is a hint, not a gate).
+  const lint = lintAssembledReport([
+    { label: "deck", text: deckText(deck) },
+    { label: "newsletter", text: newsletter.markdown },
+    { label: "shortform", text: shortFormText(shortform) },
+  ], CONTENT_LINT_CONFIG);
+
+  return { deckId, newsletterId, shortformId, deck, newsletter, shortform, lint };
 }
 
 export interface EpisodeResult { id: string; script: PodcastScript }

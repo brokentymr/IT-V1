@@ -50,6 +50,49 @@ export const SourceKind = z.enum([
 export const ProvenanceRef = z.object({ claim_id: z.string(), source_ref: IdRef });
 export type ProvenanceRef = z.infer<typeof ProvenanceRef>;
 
+// A single located numeric claim (control P3). Every material figure is a claim with a locator; a
+// free-text number with no matching verified claim is quarantined (never auto-published).
+export const NumericClaim = z.object({
+  value: z.number(),
+  unit: z.string().nullable(),
+  period: z.string().nullable(),
+  source_doc: z.string().nullable(),
+  source_locator: z.string().nullable(),
+  extraction_confidence: z.number().default(0),
+  verified: z.boolean().default(false),
+});
+export type NumericClaim = z.infer<typeof NumericClaim>;
+
+// ---------- claim dependency DAG (control P4) ----------
+// A FACT is a number/observation pulled from a source; a CLAIM is a narrative statement that consumes
+// one or more facts. When a fact is corrected/retracted every claim that consumes it goes STALE; a hard
+// accounting-identity failure retracts the implicated fact. Status lives in the mutable claim_dag tables
+// (migration 0020), kept separate from the append-only snapshot content.
+export const ClaimStatus = z.enum(["fresh", "stale", "retracted"]);
+export type ClaimStatus = z.infer<typeof ClaimStatus>;
+export const FactStatus = z.enum(["active", "corrected", "retracted"]);
+export type FactStatus = z.infer<typeof FactStatus>;
+
+export const FactNode = z.object({
+  fact_key: z.string(),
+  kind: z.string(),
+  source_ref: IdRef.nullable().default(null),
+  value_num: z.number().nullable().default(null),
+  value_text: z.string().nullable().default(null),
+  period: z.string().nullable().default(null),
+  status: FactStatus.default("active"),
+});
+export type FactNode = z.infer<typeof FactNode>;
+
+export const ClaimNode = z.object({
+  claim_kind: z.string(),
+  ordinal: z.number().int().default(0),
+  text: z.string(),
+  status: ClaimStatus.default("fresh"),
+  fact_keys: z.array(z.string()).default([]),
+});
+export type ClaimNode = z.infer<typeof ClaimNode>;
+
 /** A Tier-1 source row (the `sources` table). Every material claim refs one. */
 export const Source = z.object({
   id: Uuid,
@@ -219,6 +262,36 @@ export const Fundamentals = z.object({
   provenance: z.array(ProvenanceRef).default([]),
 });
 
+// ---------- basis labeling (control P11 — GAAP / non-GAAP / adjusted) ----------
+// Every reported figure carries its reporting basis so a non-GAAP number can never be silently read
+// as GAAP. Derived-in-house figures (e.g. FCF) carry the company-definition adjusted label; a
+// GAAP vs non-GAAP divergence beyond tolerance is surfaced as a reconciliation row; and any figure
+// asserted in the narrative that differs from the labeled GAAP model value with no basis word is flagged.
+export const BasisLabel = z.enum(["gaap", "non_gaap", "adjusted", "unadjusted"]);
+export type BasisLabel = z.infer<typeof BasisLabel>;
+
+export const FcfBridge = z.object({ ocf: z.number(), capex: z.number(), fcf: z.number() });
+export type FcfBridge = z.infer<typeof FcfBridge>;
+
+export const BasisReconciliationItem = z.object({
+  metric: z.string(),
+  gaap_value: z.number(),
+  non_gaap_value: z.number(),
+  delta: z.number(),
+  gaap_label: z.string(),
+  non_gaap_label: z.string(),
+});
+export type BasisReconciliationItem = z.infer<typeof BasisReconciliationItem>;
+
+export const BasisBlock = z.object({
+  line_item_basis: z.record(z.string(), BasisLabel).default({}),
+  fcf_bridge: FcfBridge.nullable().default(null),
+  reconciliations: z.array(BasisReconciliationItem).default([]),
+  unlabeled_flags: z.array(z.string()).default([]),
+  provenance: z.array(ProvenanceRef).default([]),
+});
+export type BasisBlock = z.infer<typeof BasisBlock>;
+
 export const BrandSentiment = z.object({
   by_platform: z.array(OpenMap).default([]),
   ground_momentum: z.string().nullable().optional(),
@@ -233,6 +306,32 @@ export const Signals = z.object({
   technical_context: z.string().nullable().optional(),
 });
 
+// ---------- risks & triggers as one typed, joined system (control P10) ----------
+// A thesis now carries typed risks and typed invalidation triggers that are JOINED: each risk names the
+// mechanism + severity and may point at the trigger that would confirm it; each trigger carries the exact
+// disclosure/observation that would fire it plus a source ref. The legacy string[] invalidation_triggers
+// is KEPT untouched for backward compatibility. The risk<->trigger join is checked (lib/engines/risk_join).
+export const RiskSeverity = z.enum(["low", "medium", "high"]);
+export type RiskSeverity = z.infer<typeof RiskSeverity>;
+
+export const Risk = z.object({
+  id: z.string(),
+  title: z.string(),
+  mechanism: z.string(),
+  quantified_impact: z.string().nullable().default(null),
+  severity: RiskSeverity,
+  linked_trigger_id: z.string().nullable().default(null),
+});
+export type Risk = z.infer<typeof Risk>;
+
+export const InvalidationTrigger = z.object({
+  id: z.string(),
+  condition: z.string(),
+  disclosure: z.string(),
+  source_ref: IdRef.nullable().default(null),
+});
+export type InvalidationTrigger = z.infer<typeof InvalidationTrigger>;
+
 export const Thesis = z.object({
   one_liner: z.string(),
   long_form: z.string(),
@@ -241,6 +340,8 @@ export const Thesis = z.object({
     .array(z.object({ event: z.string(), date: IsoDate.nullable(), expected_impact: z.string() }))
     .default([]),
   invalidation_triggers: z.array(z.string()).default([]),
+  risks: z.array(Risk).default([]),
+  triggers: z.array(InvalidationTrigger).default([]),
   conviction: z.number().int().min(1).max(5),
   positions_held: z.array(Position).default([]),
 });
@@ -280,6 +381,24 @@ export type Hypotheses = z.infer<typeof Hypotheses>;
 
 // Monte Carlo scenario (Phase-4 improvement #4): the distribution of next-period outcomes.
 const ScenarioBand = z.object({ p10: z.number(), p50: z.number(), p90: z.number() });
+
+// control P6: a typed "what to watch" item. Each item names the driver, the metric it moves, and the
+// OUTPUT band it flows into (a margin driver moves net_margin — NEVER revenue), with the bear/bull
+// impact in points and the P10/P90 band values (invariant: bear_value=P10, bull_value=P90). `text` is
+// the rendered plain-language string so every existing string consumer stays untouched.
+export const WatchItem = z.object({
+  driver: z.string(),
+  metric: MetricKey,
+  affected_band: z.enum(["revenue", "net_margin", "net_income", "eps"]),
+  bear_pts: z.number(),
+  bull_pts: z.number(),
+  bear_value: z.number(),
+  bull_value: z.number(),
+  contribution: z.number(),
+  text: z.string(),
+});
+export type WatchItem = z.infer<typeof WatchItem>;
+
 export const Scenario = z.object({
   target_period: z.string().nullable(),
   base_period: z.string().nullable(),
@@ -295,6 +414,8 @@ export const Scenario = z.object({
   anchor: OpenMap.nullable().optional(),   // the consensus the beat-probability is measured against
   sensitivity: z.array(z.object({ driver: z.string(), metric: MetricKey, contribution: z.number() })).default([]),
   watch_items: z.array(z.string()).default([]),
+  watch: z.array(WatchItem).default([]), // control P6: typed sibling of watch_items (rides in append-only content jsonb)
+  pbeat_divergence: z.string().nullable().optional(), // control P7: momentum-proxy note when model P(beat) diverges from the trailing beat rate
   provenance: z.array(ProvenanceRef).default([]),
 });
 export type Scenario = z.infer<typeof Scenario>;
@@ -306,6 +427,7 @@ export const Snapshot = z.object({
   trigger: SnapshotTrigger,
   filing_ref: IdRef.nullable().optional(),
   fundamentals: Fundamentals.optional(),
+  basis: BasisBlock.optional(), // control P11: per-line-item basis + FCF bridge + reconciliations
   market_context: MarketContext.optional(),
   hypotheses: Hypotheses.optional(),
   scenario: Scenario.optional(),

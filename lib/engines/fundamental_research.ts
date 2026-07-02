@@ -11,7 +11,7 @@
  * Append-only (spec §8): every coverage run appends a new snapshot; re-runs never mutate a prior.
  */
 import { randomUUID } from "node:crypto";
-import { query, withTransaction } from "../db/pool";
+import { query, withTransaction, getPool } from "../db/pool";
 import { SecAdapter, type CompanyFacts } from "../sources/sec";
 import { NasdaqEarningsAdapter, resolveNextEarningsDate, type NextDate } from "../sources/earnings";
 import type { PerplexityFinance, PerplexityClient } from "../sources/perplexity";
@@ -21,11 +21,12 @@ import {
 } from "../financials/model";
 import { simulateScenario, mulberry32, type ScenarioOutput } from "../financials/montecarlo";
 import { concentrationExcerpt, extractMdaSection, keywordExcerpts } from "../financials/filing_text";
-import { FUNDAMENTALS_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
+import { FUNDAMENTALS_CONFIG, PBEAT_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
+import { trailingBeatRate, pbeatDivergenceNote } from "../financials/pbeat_divergence";
 import { DESK_CONFIG, type DeskConfig } from "../config/desk";
 import { llmSpendThisMonth } from "../llm/client";
 import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
-import { demandBriefing, type FundamentalsAnalyst, type DemandProfile } from "./fundamentals_analyst";
+import { demandBriefing, type FundamentalsAnalyst, type DemandProfile, type NonGaapReconciliation } from "./fundamentals_analyst";
 import { ClaudeResearchPanel, type ResearchPanel, type ResearchEnrich } from "./research";
 import type { AutoCommitInput, AutoCommitResult } from "./autocommit";
 import type { NewsAnalyzer } from "./analyzer";
@@ -37,10 +38,22 @@ import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 import { fetchTranscript, fetchMarketData, externalBlock } from "./external_evidence";
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
+import { buildBasisBlock, reconcileBases, scanUnlabeledBasis } from "../financials/basis";
 import { computeTrends } from "../financials/trends";
 import { checkIdentities, identityLog } from "../financials/identity";
+import { scoreDisclosureCoverage, coverageScorecardLog } from "../financials/coverage_scorer";
+import { DISCLOSURE_KEYWORDS, DISCLOSURE_TEXT_BUDGET } from "../config/disclosure_checklist";
 import { checkConsistency, type ComputedFacts } from "./consistency";
+import { checkRiskTriggerJoin, blocks, type RiskJoinFinding } from "./risk_join";
 import { positioningComplete, type PositioningDesk, type PositioningDecision } from "./positioning";
+import { quarantineText, buildVerifiedClaims } from "../provenance/numeric";
+import { persistNumericClaims } from "../provenance/store";
+import { PROVENANCE_CONFIG } from "../config/provenance";
+import { buildClaimDag, propagateRestatement, retractFact } from "./claim_dag";
+import { CLAIM_DAG_CONFIG } from "../config/claim_dag";
+import { positioningReadout } from "./positioning_readout";
+import { POSITIONING_CONFIG } from "../config/positioning";
+import { upsertReadThrough, linkReadThroughMatch } from "./read_through_relationships";
 
 interface CompanyRow {
   id: string;
@@ -207,6 +220,8 @@ export interface CoverageResult {
   missing_metrics: string[];
   links_enriched: number;
   read_through_notes: number;
+  // Control P12: uncovered counterparties + demand customers recorded as read-through relationship edges.
+  read_through_relationships: number;
   drivers_extracted: number;
   scenario: ScenarioOutput | null;
   confidence: number;
@@ -220,6 +235,12 @@ export interface CoverageResult {
   published_status: string;
   content_job_id: string | null;
   deepen_rounds: number;
+  // Control P4 (claim dependency DAG) — defaulted (0) when the DAG build/propagation is skipped or fails.
+  claims_built: number;
+  claims_stale_flagged: number;
+  // Control P5 (per-filing-type disclosure coverage scorer).
+  coverage_gaps: number;
+  coverage_scorecard_ok: boolean;
 }
 
 export async function runCoveragePass(opts: {
@@ -328,6 +349,14 @@ export async function runCoveragePass(opts: {
 
   const scenario = buildScenario(facts.data, model, drivers, mc?.consensus ?? null, company, config, opts.rng);
 
+  // Statistical floor (control P7): compare the model-implied P(beat consensus) against the company's own
+  // trailing beat rate (fraction of trailing quarters that grew revenue YoY). A large divergence is a
+  // momentum PROXY worth flagging — never a forecast. Null (no note) when either rate is unavailable.
+  const trailingRate = trailingBeatRate(facts.data, PBEAT_CONFIG, config);
+  const pbeatDivergence = scenario
+    ? pbeatDivergenceNote(scenario.beat_probability, trailingRate, model, scenario.sensitivity, PBEAT_CONFIG)
+    : null;
+
   // 3d. Open areas of interest — the between-filing developments the News Monitor accumulated. The
   // desk reasons over them explicitly, then adjudicates which this filing resolves (step 7).
   const openAreas = await loadOpenAreas(company.id);
@@ -350,13 +379,33 @@ export async function runCoveragePass(opts: {
   // citable to the filing. Fed to the desk so its claims about returns and the balance sheet are grounded.
   const levers = computeLevers(model, /^10-K/i.test(opts.formType ?? "") ? 365 : 91);
 
+  // Basis labeling (control P11): every XBRL line item is GAAP; the FCF bridge is company-defined
+  // (adjusted). Best-effort: if the analyst can read the filing's non-GAAP reconciliation table, we
+  // reconcile GAAP vs non-GAAP EPS/margins. Non-blocking — this only labels/annotates, never gates.
+  const basisBlock = buildBasisBlock(model, levers);
+  let nonGaap: NonGaapReconciliation | null = null;
+  if (html && opts.analyst.extractNonGaap) {
+    const nonGaapText = [concentrationExcerpt(html, Math.floor(config.linkTextBudget / 2)), extractMdaSection(html, Math.floor(config.mdaTextBudget / 2))].filter(Boolean).join("\n\n");
+    if (nonGaapText) {
+      nonGaap = await opts.analyst.extractNonGaap({
+        company: { legal_name: company.legal_name, ticker: company.primary_ticker },
+        filing: { form: opts.formType ?? "Filing" }, text: nonGaapText,
+      }).catch((e) => { console.warn(`[coverage] non-GAAP extraction failed: ${(e as Error).message}`); return null; });
+    }
+  }
+  if (nonGaap) basisBlock.reconciliations = reconcileBases(model, nonGaap);
+
   // W3: multi-year trend context from the filing history — grounds baseline/cyclicality claims.
   const trends = computeTrends(metricYoYGrowths(facts.data, "revenue", config), netMarginLevels(facts.data, config), model.ratios.net_margin ?? null);
 
-  const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
+  const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing, pbeatDivergence);
   const demandBrief = demand ? demandBriefing(demand) : "";
   const trendBrief = trends.read ? `\n\n${trends.read}` : "";
-  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}${demandBrief ? `\n\n${demandBrief}` : ""}${trendBrief}`;
+  // Control P11 basis disclosure for the desk: figures are GAAP; FCF is company-defined (adjusted);
+  // any GAAP vs non-GAAP reconciliation is labeled so the desk never conflates the two bases.
+  const basisBrief = `Reporting basis (control P11): line-item figures are GAAP; free cash flow is adjusted (company definition: operating cash flow − capex).`
+    + (basisBlock.reconciliations.length ? ` GAAP vs non-GAAP: ${basisBlock.reconciliations.map((r) => `${r.metric} ${r.gaap_label} ${r.gaap_value} vs ${r.non_gaap_label} ${r.non_gaap_value}`).join("; ")}.` : "");
+  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}\n\n${basisBrief}${demandBrief ? `\n\n${demandBrief}` : ""}${trendBrief}`;
   const evidence = coherence.agree ? withLevers : `${withLevers}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
@@ -454,6 +503,29 @@ export async function runCoveragePass(opts: {
   }
   const synth = research.thesis;
 
+  // Control P11: scan the narrative for EPS/margin figures that differ from the labeled GAAP model
+  // value with no basis word — an unlabeled non-GAAP number. Non-blocking; flags are stamped for review.
+  const synthText = `${synth.one_liner} ${synth.long_form} ${(synth.invalidation_triggers ?? []).join(" ")} ${(synth.tensions ?? []).join(" ")}`;
+  basisBlock.unlabeled_flags = scanUnlabeledBasis(synthText, model, nonGaap);
+  if (basisBlock.unlabeled_flags.length) console.warn(`[coverage] ${company.primary_ticker} unlabeled-basis figures in narrative: ${basisBlock.unlabeled_flags.join(" | ")}`);
+
+  // Provenance (control P3): every figure the pipeline computed is a verified located claim; any
+  // invalidation trigger that asserts a CURRENCY figure with no grounding among those claims is
+  // quarantined (dropped from the published triggers and flagged; blocks auto-publish below).
+  const verifiedClaims = PROVENANCE_CONFIG.enabled ? buildVerifiedClaims(model, scenario, levers) : [];
+  const q = PROVENANCE_CONFIG.enabled
+    ? quarantineText(synth.invalidation_triggers, verifiedClaims, PROVENANCE_CONFIG)
+    : { admitted: synth.invalidation_triggers, quarantined: [] as string[] };
+  if (q.quarantined.length) console.warn(`[coverage] ${company.primary_ticker} quarantined ungrounded triggers: ${q.quarantined.join(" | ")}`);
+
+  // Control P10: risks & triggers as one typed, joined system. Normalize ids deterministically when the
+  // desk omits them (so the join is stable), then check the join — a trigger with no linking risk or no
+  // verifiable disclosure BLOCKS auto-publish; an unlinked risk is a warning. Pure, modeled on the W6 check.
+  const p10Risks = (synth.risks ?? []).map((r, i) => ({ ...r, id: r.id?.trim() || `r${i + 1}` }));
+  const p10Triggers = (synth.triggers ?? []).map((t, i) => ({ ...t, id: t.id?.trim() || `t${i + 1}` }));
+  const riskJoin: RiskJoinFinding[] = checkRiskTriggerJoin(p10Risks, p10Triggers);
+  if (riskJoin.length) console.warn(`[coverage] ${company.primary_ticker} risk/trigger join: ${riskJoin.map((f) => `${f.kind}(${f.severity})`).join(", ")}`);
+
   // W6: consistency — do the desk's claims contradict the computed figures? Conflicts are held for review.
   const cfacts: ComputedFacts = {
     fcf_negative: levers.balance_sheet.free_cash_flow != null && levers.balance_sheet.free_cash_flow < 0,
@@ -466,6 +538,24 @@ export async function runCoveragePass(opts: {
   const consistencyText = `${synth.one_liner} ${synth.long_form} ${research.panel.flatMap((p) => p.claims.map((c) => c.statement)).join(" ")}`;
   const consistency = checkConsistency(cfacts, consistencyText);
   if (consistency.length) console.warn(`[coverage] ${company.primary_ticker} consistency conflicts: ${consistency.map((c) => c.fact).join(", ")}`);
+
+  // Control P5: per-filing-type disclosure coverage scorer. Deterministic, non-LLM: checks the disclosures
+  // a reader of this form expects (revenue/margins/EPS/OCF/capex/FCF, and conditionally guidance/RPO-backlog/
+  // buyback/customer-concentration) are present in the model AND captured in the analysis. A missing CRITICAL
+  // disclosure (no revenue, or an RPO/backlog figure disclosed in the filing but never captured — the F4 hold)
+  // holds the thesis for review (scorecard.ok=false); expected/optional gaps are stamped for the report.
+  // Forward %-of-revenue claims with no grounding are soft-flagged. Reads a bounded filing excerpt so the
+  // if_disclosed checks see only the relevant disclosure language.
+  const claimTexts = [
+    synth.one_liner, synth.long_form, synth.actual_vs_expected ?? "",
+    ...research.panel.flatMap((p) => p.claims.map((c) => c.statement)),
+    ...drivers.flatMap((d) => [d.framing, d.quote ?? ""]),
+  ].filter((s): s is string => !!s);
+  const disclosureText = html ? keywordExcerpts(html, DISCLOSURE_KEYWORDS, DISCLOSURE_TEXT_BUDGET) : null;
+  const scorecard = scoreDisclosureCoverage({
+    formType: opts.formType ?? null, model, demand, drivers, claimTexts, filingText: disclosureText,
+  });
+  console.log(`[coverage] ${company.primary_ticker} ${coverageScorecardLog(scorecard)}`);
 
   // Positioning / decision (pipeline upgrade — Doc 2): convert the adjudicated research into an actual
   // CALL — stance, variant view, target range, dated catalysts, sizing. Injectable; skipped when not
@@ -485,6 +575,31 @@ export async function runCoveragePass(opts: {
       market_context: mc ? JSON.stringify({ consensus: mc.consensus, analyst_view: mc.analyst_view }) : undefined,
       next_earnings_date: company.next_earnings_date,
     }).catch((e) => { console.warn(`[coverage] positioning failed: ${(e as Error).message}`); return null; });
+
+    // Control P12: deterministic positioning readout — implied assumptions, an illustrative fair value
+    // reconciled against the target/lean, and an action rule for every invalidation trigger. Spot is
+    // best-effort from the latest price signal; degrades to null (no readout) when spot/scenario/target
+    // are missing. Merged onto the decision before it is written to the snapshot content.
+    if (positioning) {
+      const spotRow = await query<{ price: number | null }>(
+        `SELECT (payload->>'price')::float8 AS price FROM signal_events
+          WHERE company_id = $1 AND payload ? 'price' ORDER BY ts DESC LIMIT 1`,
+        [company.id],
+      ).catch(() => ({ rows: [] as { price: number | null }[] }));
+      const readout = positioningReadout({
+        modelRatios: { gross_margin: model.ratios.gross_margin ?? null, net_margin: model.ratios.net_margin ?? null },
+        scenarioBands: scenario ? { eps: scenario.bands.eps ?? null, revenue_growth: scenario.bands.revenue_growth ?? null } : null,
+        priceTarget: positioning.price_target,
+        spot: spotRow.rows[0]?.price ?? null,
+        consensusMultiple: null,
+        lean: positioning.strategic_stance,
+        invalidationTriggers: positioning.invalidation_triggers,
+        actionRules: positioning.action_rules,
+      }, POSITIONING_CONFIG);
+      if (readout) {
+        positioning = { ...positioning, implied_assumptions: readout.implied_assumptions, fair_value: readout.fair_value, action_rules: readout.action_rules };
+      }
+    }
   }
 
   const asOf = opts.asOf ?? model.period_end ?? todayIso();
@@ -492,6 +607,9 @@ export async function runCoveragePass(opts: {
   const snapshotId = randomUUID();
 
   // 4. Append the snapshot atomically with its source row (provenance for every line item).
+  // Control P12: surface the filing source id to the outer scope so the post-commit read-through
+  // enrichment can stamp source_ref on its edges (best-effort — the field is nullable).
+  let filingSourceId: string | null = null;
   await withTransaction(async (client) => {
     const src = await client.query<{ id: string }>(
       `INSERT INTO sources (company_id, tier, kind, origin, url, title, retrieved_at, metadata)
@@ -499,6 +617,8 @@ export async function runCoveragePass(opts: {
       [company.id, filingUrl ?? null, `${opts.formType ?? "Filing"} ${opts.accession}`, { accession: opts.accession }],
     );
     const sourceId = src.rows[0].id;
+    filingSourceId = sourceId; // control P12: surfaced for post-commit read-through enrichment
+    basisBlock.provenance = [{ claim_id: "basis", source_ref: sourceId }]; // control P11: stamp the filing
 
     // Advisory market context gets its OWN source row (Perplexity/Fiscal.ai) — kept distinct from
     // the filing provenance so the XBRL numbers and the external context never blur together.
@@ -526,7 +646,9 @@ export async function runCoveragePass(opts: {
         date: /^\d{4}-\d{2}-\d{2}$/.test(c.date ?? "") ? c.date : null,
         expected_impact: `${c.expected_direction}${c.why ? `: ${c.why}` : ""}`,
       })),
-      invalidation_triggers: synth.invalidation_triggers,
+      invalidation_triggers: q.admitted,
+      risks: p10Risks,           // control P10: typed risks (mechanism/severity/linked trigger)
+      triggers: p10Triggers,     // control P10: typed invalidation triggers with verifiable disclosure
       conviction: synth.conviction,
       positions_held: (company.coverage?.positions_held as never[]) ?? [],
     });
@@ -545,7 +667,7 @@ export async function runCoveragePass(opts: {
       ? { as_of: new Date().toISOString(), filing_ref: opts.accession, drivers, provenance: [{ claim_id: "hypotheses", source_ref: sourceId }] }
       : undefined;
     const scenarioBlock = scenario
-      ? { ...scenario, anchor: (mc?.consensus as Record<string, unknown> | null) ?? null, coherence, provenance: [{ claim_id: "scenario", source_ref: sourceId }] }
+      ? { ...scenario, anchor: (mc?.consensus as Record<string, unknown> | null) ?? null, coherence, pbeat_divergence: pbeatDivergence, provenance: [{ claim_id: "scenario", source_ref: sourceId }] }
       : undefined;
 
     const content = {
@@ -560,9 +682,13 @@ export async function runCoveragePass(opts: {
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
       levers, // ROE/DuPont + balance-sheet health, computed from XBRL (grounded to the filing)
+      basis: basisBlock, // control P11: per-line-item basis + FCF bridge + GAAP/non-GAAP reconciliation
       data_integrity: integrity, // MU-audit P1: the accounting-identity gate's execution log for this snapshot
+      coverage_scorecard: scorecard, // control P5: per-filing-type disclosure coverage (gaps + %-claim flags)
       trends, // W3: multi-year trend/cyclicality context from the filing series
       ...(consistency.length ? { consistency } : {}), // W6: claims that conflict with the computed figures
+      ...(riskJoin.length ? { risk_join: riskJoin } : {}), // P10: risk<->trigger join findings (blocks hold auto-publish)
+      ...(q.quarantined.length ? { provenance_audit: { quarantined_triggers: q.quarantined } } : {}), // P3: ungrounded currency triggers held out
       ...(demand ? { demand } : {}), // demand-side levers extracted from the primary filing text
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
@@ -577,7 +703,29 @@ export async function runCoveragePass(opts: {
       [snapshotId, cf.id, company.id, asOf, cycleLabel, trigger, synth.conviction, research.verification.confidence, opts.accession,
         JSON.stringify(content), JSON.stringify(diff)],
     );
+
+    // Provenance (control P3): persist the verified located claims + extracted trigger tokens in the
+    // SAME transaction as the snapshot append (after the snapshot row exists, so the FK holds), so the
+    // numbers and their grounding commit atomically with the snapshot.
+    if (PROVENANCE_CONFIG.enabled) {
+      await persistNumericClaims(client, { snapshotId, companyId: company.id, sourceRef: sourceId, verified: verifiedClaims, triggerClaims: q });
+    }
   });
+
+  // 4b. Control P4 — claim dependency DAG. Build the fact->claim DAG for this snapshot, retract the
+  // facts implicated by a hard accounting-identity failure (staling their claims), then propagate any
+  // RESTATEMENT of a prior period's facts (same fact_key + same period diverging beyond tolerance, or a
+  // vanished metric — a routine next-period filing never flags) to stale the prior claims that consumed
+  // them. Best-effort AFTER the snapshot tx committed: it can never roll back the snapshot.
+  const dag = await buildClaimDag(snapshotId).catch((e) => { console.warn(`[coverage] claim DAG build failed: ${(e as Error).message}`); return null; });
+  if (CLAIM_DAG_CONFIG.retractOnIdentityHardFail && integrity.ok === false) {
+    for (const metric of integritySuppressed) {
+      await retractFact({ snapshotId, factKey: `fundamentals.${metric}`, reason: "accounting-identity hard failure" })
+        .catch((e) => { console.warn(`[coverage] fact retraction failed: ${(e as Error).message}`); return 0; });
+    }
+  }
+  const claimsStaleFlagged = await propagateRestatement(company.id, snapshotId)
+    .catch((e) => { console.warn(`[coverage] restatement propagation failed: ${(e as Error).message}`); return 0; });
 
   // 5. Carry hypotheses into current_events (the next forward pass reads them); enrich links from html.
   if (drivers.length) {
@@ -587,11 +735,14 @@ export async function runCoveragePass(opts: {
     ).catch((e) => console.warn(`[coverage] hypotheses persist failed: ${(e as Error).message}`));
   }
   let linksEnriched = 0;
+  let readThroughEdges = 0;
   if (html) {
-    linksEnriched = await enrichLinks(opts, company, html, config).catch((e) => {
+    const enriched = await enrichLinks(opts, company, html, config, { snapshotId, sourceRef: filingSourceId, demand }).catch((e) => {
       console.warn(`[coverage] link enrichment failed: ${(e as Error).message}`);
-      return 0;
+      return { links: 0, readThrough: 0 };
     });
+    linksEnriched = enriched.links;
+    readThroughEdges = enriched.readThrough;
   }
 
   // 6. Read-through: the filing is the origin event; propagate to linked assets.
@@ -634,7 +785,7 @@ export async function runCoveragePass(opts: {
   const positioningOk = positioning ? positioningComplete(positioning).complete : true;
   // A claim that contradicts the computed figures (W6) is a hard hold, like a standing contradiction.
   // A hard accounting-identity failure (MU-audit P1) is likewise never auto-published — held for review.
-  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0 && integrity.ok;
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0 && integrity.ok && q.quarantined.length === 0 && (p10Triggers.length === 0 || blocks(riskJoin).length === 0) && scorecard.ok;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;
@@ -657,6 +808,7 @@ export async function runCoveragePass(opts: {
     company_id: company.id, snapshot_id: snapshotId, as_of: asOf, cycle_label: cycleLabel,
     conviction: synth.conviction, metrics_extracted: Object.keys(line_items).length,
     missing_metrics: missing, links_enriched: linksEnriched, read_through_notes: readThroughNotes,
+    read_through_relationships: readThroughEdges,
     drivers_extracted: drivers.length, scenario,
     confidence: research.verification.confidence,
     grounded_coverage: grounding.report.coverage,
@@ -664,6 +816,8 @@ export async function runCoveragePass(opts: {
     areas_addressed: openAreas.length, areas_resolved: areasResolved, areas_carried: areasCarried,
     committed, published_status: publishedStatus, content_job_id: contentJobId,
     deepen_rounds: dp ? dp.rounds.length : 0,
+    claims_built: dag?.claims ?? 0, claims_stale_flagged: claimsStaleFlagged,
+    coverage_gaps: scorecard.gaps.length, coverage_scorecard_ok: scorecard.ok,
   };
 }
 
@@ -671,6 +825,7 @@ export async function runCoveragePass(opts: {
 function buildEvidence(
   model: FinancialModel, diff: SnapshotDiff, drivers: Driver[], scenario: ScenarioOutput | null,
   mc: MarketContextData | null, openAreas: OpenArea[], filingLabel: string, surpriseBrief = "",
+  pbeatNote: string | null = null,
 ): string {
   const b = (n: number) => (Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
   // The surprise briefing leads: it must frame how the desk reads every figure below it.
@@ -682,7 +837,7 @@ function buildEvidence(
   const ch = diff.metrics.filter((m) => m.change_pct != null).map((m) => `${m.label} ${m.direction} ${((m.change_pct as number) * 100).toFixed(1)}%`);
   if (ch.length) lines.push(`Change vs prior snapshot: ${ch.join(", ")}`);
   if (drivers.length) lines.push(`MD&A drivers: ${drivers.map((d) => `${d.name} (${d.metric}, ${d.direction})`).join("; ")}`);
-  if (scenario?.bands?.revenue) lines.push(`Monte Carlo next period: revenue P10/P50/P90 ${b(scenario.bands.revenue.p10)}/${b(scenario.bands.revenue.p50)}/${b(scenario.bands.revenue.p90)}; P(beat rev) ${scenario.beat_probability.revenue ?? "—"}; top driver ${scenario.sensitivity[0]?.driver ?? "—"}`);
+  if (scenario?.bands?.revenue) lines.push(`Monte Carlo next period: revenue P10/P50/P90 ${b(scenario.bands.revenue.p10)}/${b(scenario.bands.revenue.p50)}/${b(scenario.bands.revenue.p90)}; P(beat rev) ${scenario.beat_probability.revenue ?? "—"}; top driver ${scenario.sensitivity[0]?.driver ?? "—"}${pbeatNote ? ` ${pbeatNote}` : ""}`);
   if (mc?.consensus) lines.push(`Consensus (Perplexity/Fiscal.ai): ${JSON.stringify(mc.consensus)}`);
   if (mc?.analyst_view) lines.push(`Analyst view: ${JSON.stringify(mc.analyst_view)}`);
   if (openAreas.length) {
@@ -762,40 +917,80 @@ function buildScenario(
   });
 }
 
-/** Read named counterparties out of the filing and upsert links to companies already in our universe. */
+/**
+ * Read named counterparties out of the filing. Covered counterparties (already in our universe) become
+ * company_links edges as before; UNCOVERED ones — plus the demand-side customers extracted from the
+ * filing text — are recorded as read_through_relationships so the relationship graph is no longer empty
+ * for names we don't yet cover (control P12). When a counterparty later becomes covered, its earlier
+ * uncovered edge is pointed at the covered company; the covered company_links edge is preferred on
+ * de-dupe. Returns the count of company_links created + read-through edges upserted.
+ */
 async function enrichLinks(
   opts: { accession: string; formType?: string | null; analyst: FundamentalsAnalyst },
   company: CompanyRow,
   html: string,
   config: FundamentalsConfig,
-): Promise<number> {
+  ctx: { snapshotId: string; sourceRef: string | null; demand: DemandProfile | null },
+): Promise<{ links: number; readThrough: number }> {
+  const client = getPool();
+  let links = 0;
+  let readThrough = 0;
+
   const text = concentrationExcerpt(html, config.linkTextBudget);
-  if (!text) return 0;
+  if (text) {
+    const extracted = await opts.analyst.extractLinks({
+      company: { legal_name: company.legal_name, ticker: company.primary_ticker },
+      filing: { form: opts.formType ?? "Filing" }, text,
+    });
 
-  const extracted = await opts.analyst.extractLinks({
-    company: { legal_name: company.legal_name, ticker: company.primary_ticker },
-    filing: { form: opts.formType ?? "Filing" }, text,
-  });
+    for (const link of extracted.links) {
+      // Match only to companies ALREADY covered — never auto-create (that is Ingestion's job).
+      const match = await query<{ id: string; gics_sector: string | null }>(
+        `SELECT id, gics_sector FROM companies
+          WHERE ($1::text IS NOT NULL AND upper(primary_ticker) = upper($1))
+             OR lower(legal_name) = lower($2) LIMIT 1`,
+        [link.ticker, link.name],
+      );
+      const to = match.rows[0];
+      if (to && to.id === company.id) continue; // self-reference
 
-  let created = 0;
-  for (const link of extracted.links) {
-    // Match only to companies ALREADY covered — never auto-create (that is Ingestion's job).
-    const match = await query<{ id: string; gics_sector: string | null }>(
-      `SELECT id, gics_sector FROM companies
-        WHERE ($1::text IS NOT NULL AND upper(primary_ticker) = upper($1))
-           OR lower(legal_name) = lower($2) LIMIT 1`,
-      [link.ticker, link.name],
-    );
-    const to = match.rows[0];
-    if (!to || to.id === company.id) continue;
-    const crossSector = !!company.gics_sector && !!to.gics_sector && company.gics_sector !== to.gics_sector;
-    const res = await query(
-      `INSERT INTO company_links (from_company_id, to_company_id, type, cross_sector, strength, direction_note, rationale, status)
-       VALUES ($1,$2,$3,$4,'medium',$5,$6,'unverified')
-       ON CONFLICT (from_company_id, to_company_id, type) DO NOTHING`,
-      [company.id, to.id, link.type, crossSector, `from ${opts.formType ?? "filing"} ${opts.accession}`, link.rationale],
-    );
-    created += res.rowCount ?? 0;
+      if (to) {
+        // Covered → company_links (unchanged). Prefer this edge; point any earlier uncovered
+        // read-through edge for the same counterparty at the now-covered company.
+        const crossSector = !!company.gics_sector && !!to.gics_sector && company.gics_sector !== to.gics_sector;
+        const res = await query(
+          `INSERT INTO company_links (from_company_id, to_company_id, type, cross_sector, strength, direction_note, rationale, status)
+           VALUES ($1,$2,$3,$4,'medium',$5,$6,'unverified')
+           ON CONFLICT (from_company_id, to_company_id, type) DO NOTHING`,
+          [company.id, to.id, link.type, crossSector, `from ${opts.formType ?? "filing"} ${opts.accession}`, link.rationale],
+        );
+        links += res.rowCount ?? 0;
+        await linkReadThroughMatch(client, company.id, link.name, to.id).catch(() => 0);
+      } else {
+        // Uncovered → record a read-through relationship edge.
+        readThrough += await upsertReadThrough(client, {
+          companyId: company.id, snapshotId: ctx.snapshotId, counterpartyName: link.name, ticker: link.ticker,
+          type: link.type, materiality: link.materiality, rationale: link.rationale, readThrough: link.rationale,
+          sourceRef: ctx.sourceRef,
+        });
+      }
+    }
   }
-  return created;
+
+  // Additionally: map the demand-side customers extracted from the filing to customer-type edges.
+  for (const cust of ctx.demand?.customers ?? []) {
+    const match = await query<{ id: string }>(
+      "SELECT id FROM companies WHERE lower(legal_name) = lower($1) LIMIT 1", [cust.name],
+    );
+    const toId = match.rows[0]?.id && match.rows[0].id !== company.id ? match.rows[0].id : null;
+    const readThroughNote = cust.relationship || cust.note || (cust.share_pct != null ? `~${cust.share_pct}% of revenue` : "named customer");
+    const materiality = cust.reliability === "at_risk" ? "high" : (cust.share_pct != null && cust.share_pct >= 10) ? "high" : "medium";
+    readThrough += await upsertReadThrough(client, {
+      companyId: company.id, snapshotId: ctx.snapshotId, counterpartyName: cust.name, ticker: null,
+      type: "customer", materiality, rationale: cust.note || cust.relationship || "disclosed customer",
+      readThrough: readThroughNote, toCompanyId: toId, sourceRef: ctx.sourceRef,
+    });
+  }
+
+  return { links, readThrough };
 }

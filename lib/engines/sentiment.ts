@@ -10,7 +10,9 @@ import { query } from "../db/pool";
 import type { ProvenanceStamp } from "../sources/types";
 import { StockTwitsAdapter, GdeltToneAdapter, type StockTwitsMessage } from "../sources/sentiment";
 import { SENTIMENT_CONFIG, type SentimentConfig } from "../config/sentiment";
+import { ENTITY_GATE } from "../config/entity_gate";
 import { ClaudeSentimentAnalyzer, type SentimentAnalyzer } from "./sentiment_analyzer";
+import { applyVolumeFloor, shouldSuppressTempo, scrubTempo } from "./sentiment_floor";
 import { accumulateArea } from "./areas_of_interest";
 
 export interface PlatformSignal { platform: string; volume: number; sentiment: number; trend: string; top_themes: string[]; samples: string[] }
@@ -20,7 +22,7 @@ export interface SentimentResult {
   ticker: string;
   trigger: string;
   window_days: number;
-  by_platform: Array<{ platform: string; volume: number; sentiment: number; trend: string; top_themes: string[] }>;
+  by_platform: Array<{ platform: string; volume: number; sentiment: number; trend: string; top_themes: string[]; net_display: string; low_volume: boolean }>;
   ground_momentum: string;
   gap: { direction: string; magnitude: string; rationale: string };
   confidence: number;
@@ -112,8 +114,9 @@ export async function runSentiment(opts: {
               to_char(detected_at,'YYYY-MM-DD"T"HH24:MI:SS') AS t
          FROM news_notes
         WHERE company_id = $1 AND origin_kind = 'primary' AND detected_at >= to_timestamp($2 / 1000.0)
+          AND NOT (category = 'other' AND importance_score < $3)
         ORDER BY detected_at DESC LIMIT 50`,
-      [opts.companyId, cutoff],
+      [opts.companyId, cutoff, ENTITY_GATE.otherCategoryImportanceFloor],
     );
     if (notes.rows.length) {
       const scored = notes.rows.map((n) => ({ t: Date.parse(n.t), s: effectScore(n.effect ?? "neutral") }));
@@ -124,6 +127,11 @@ export async function runSentiment(opts: {
 
   const recentDirection = `${thesis?.conviction ? `thesis conviction ${thesis.conviction}/5` : "no thesis"}; recent news ${newsNet > 0.15 ? "supportive" : newsNet < -0.15 ? "pressuring" : "mixed"}`;
 
+  // Statistical floor (control P7): when EVERY contributing platform is below the volume floor the whole
+  // window is too thin to claim tempo — instruct the analyzer to describe the crowd statically, then
+  // scrub any velocity language it emits anyway. shouldSuppressTempo over an empty list is vacuously true.
+  const suppressTempo = signals.length > 0 && shouldSuppressTempo(signals, config);
+
   // Synthesis (themes + ground-momentum + gap). Skip the LLM if every platform degraded.
   let ground_momentum = "Insufficient signal — all platforms degraded.";
   let gap = { direction: "aligned", magnitude: "low" as "low" | "medium" | "high", rationale: "No usable sentiment signal this window." };
@@ -132,14 +140,22 @@ export async function runSentiment(opts: {
       company: { legal_name: company.legal_name, ticker: company.primary_ticker },
       platforms: signals.map((s) => ({ platform: s.platform, volume: s.volume, sentiment: s.sentiment, trend: s.trend, samples: s.samples })),
       fundamentals: { thesis: thesis?.one_liner ?? null, conviction: thesis?.conviction ?? null, recent_direction: recentDirection },
+      ...(suppressTempo ? { suppress_tempo: true, bannedPhrases: config.tempoBannedPhrases } : {}),
     });
-    ground_momentum = synth.ground_momentum;
-    gap = synth.gap;
+    // Post-filter the narrative: the analyzer is a fallible collaborator, so we deterministically strip
+    // any tempo/velocity language it emitted anyway when the window is too thin to support it.
+    ground_momentum = suppressTempo ? scrubTempo(synth.ground_momentum, config) : synth.ground_momentum;
+    gap = suppressTempo ? { ...synth.gap, rationale: scrubTempo(synth.gap.rationale, config) } : synth.gap;
     for (const s of signals) s.top_themes = synth.by_platform_themes.find((t) => t.platform === s.platform)?.top_themes ?? [];
   }
 
   const confidence = Number(clamp(1 - config.confidencePenaltyPerMissing * degraded.length, 0, 1).toFixed(2));
-  const by_platform = signals.map((s) => ({ platform: s.platform, volume: s.volume, sentiment: Number(s.sentiment.toFixed(2)), trend: s.trend, top_themes: s.top_themes }));
+  // Volume floor per platform: below the floor the trend/net display is suppressed (numeric kept for
+  // back-compat); between the floors the net is capped to one decimal; above, full precision stands.
+  const by_platform = signals.map((s) => {
+    const f = applyVolumeFloor({ platform: s.platform, volume: s.volume, sentiment: s.sentiment, trend: s.trend, top_themes: s.top_themes }, config);
+    return { platform: f.platform, volume: f.volume, sentiment: f.sentiment, trend: f.trend, top_themes: f.top_themes, net_display: f.net_display, low_volume: f.low_volume };
+  });
 
   const block = {
     as_of: new Date(now).toISOString(),

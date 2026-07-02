@@ -30,13 +30,13 @@ export type DeckNarrative = z.infer<typeof DeckNarrative>;
 
 export interface Deck { title: string; subtitle: string; slides: Slide[] }
 
-export interface DeckBuilder { build(input: { substance: Substance; voice: string; glossary: string }): Promise<DeckNarrative> }
+export interface DeckBuilder { build(input: { substance: Substance; voice: string; glossary: string; registryBlock?: string }): Promise<DeckNarrative> }
 
 // The narrative sections the builder fills, in canonical §6.2 order (header/footer added by the engine).
 const MIDDLE_SECTIONS = ["one_liner", "what_they_do", "numbers", "value_picture", "right", "wrong", "price", "ground_truth", "watching"] as const;
 
 export class ClaudeDeckBuilder implements DeckBuilder {
-  async build(input: { substance: Substance; voice: string; glossary: string }): Promise<DeckNarrative> {
+  async build(input: { substance: Substance; voice: string; glossary: string; registryBlock?: string }): Promise<DeckNarrative> {
     const s = input.substance;
     const b = (n: number) => (Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
     const facts = [
@@ -50,7 +50,7 @@ export class ClaudeDeckBuilder implements DeckBuilder {
       `Rolling outlook: ${s.rolling_outlook || "—"}. Open areas: ${s.open_areas.map((a) => a.title).join("; ") || "—"}.`,
     ].filter(Boolean).join("\n");
 
-    const prompt = `${input.voice}${input.glossary}
+    const prompt = `${input.voice}${input.glossary}${input.registryBlock ? `\n${input.registryBlock}` : ""}
 
 You are building a swipeable DECK for ${s.company.legal_name} (${s.company.ticker ?? "unlisted"}). One BIG idea per slide,
 color-coded, plain but substantive. Produce exactly these slides in this order, using the given "section" key:
@@ -78,8 +78,8 @@ Return JSON: {"slides": [{"section","title","headline","bullets":[..],"metric":{
 }
 
 /** Build the full deck: deterministic header + ordered narrative slides + deterministic footer. */
-export async function buildDeck(substance: Substance, builder: DeckBuilder = new ClaudeDeckBuilder()): Promise<Deck> {
-  const narrative = await builder.build({ substance, voice: HOUSE_VOICE, glossary: await glossaryBlock() });
+export async function buildDeck(substance: Substance, builder: DeckBuilder = new ClaudeDeckBuilder(), registryBlock?: string): Promise<Deck> {
+  const narrative = await builder.build({ substance, voice: HOUSE_VOICE, glossary: await glossaryBlock(), registryBlock });
   if (narrative.glossary.length) await recordGlossary(narrative.glossary);
 
   const header: Slide = {

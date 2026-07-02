@@ -9,6 +9,9 @@
 import type { CompanyFacts, XbrlUnitValue } from "../sources/sec";
 import { FUNDAMENTALS_CONFIG, type FundamentalsConfig, type MetricSpec } from "../config/fundamentals";
 
+/** Reporting basis of a figure (control P11). XBRL us-gaap line items are GAAP by definition. */
+export type Basis = "gaap" | "non_gaap" | "adjusted" | "unadjusted";
+
 export interface LineItem {
   key: string;
   label: string;
@@ -20,6 +23,7 @@ export interface LineItem {
   fp: string | null;       // FY | Q1 | Q2 | Q3
   form: string | null;
   accession: string | null; // provenance: the filing that reported this value
+  basis: Basis;            // reporting basis (control P11) — XBRL line items are GAAP
   yoy: { prior_value: number; prior_end: string; change_pct: number } | null;
 }
 
@@ -193,7 +197,7 @@ export function extractStatements(
         key: spec.key, label: spec.label, value: chosen.val, unit: spec.unit,
         period_end: chosen.end, period_start: chosen.start ?? null,
         fy: chosen.fy ?? null, fp: chosen.fp ?? null, form: chosen.form ?? null,
-        accession: chosen.accn ?? null, yoy: null,
+        accession: chosen.accn ?? null, basis: "gaap", yoy: null,
       };
       continue;
     }
@@ -216,6 +220,7 @@ export function extractStatements(
       fp: chosen.fp,
       form: chosen.form,
       accession: chosen.accn,
+      basis: "gaap",
       yoy: prior && prior.val !== 0
         ? { prior_value: prior.val, prior_end: prior.end, change_pct: (chosen.val - prior.val) / Math.abs(prior.val) }
         : null,

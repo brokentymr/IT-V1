@@ -23,12 +23,12 @@ export type NewsletterDraft = z.infer<typeof NewsletterDraft>;
 
 export interface Newsletter { title: string; markdown: string; embedded_slides: string[] }
 
-export interface NewsletterBuilder { build(input: { substance: Substance; deckSections: string[]; voice: string; glossary: string }): Promise<NewsletterDraft> }
+export interface NewsletterBuilder { build(input: { substance: Substance; deckSections: string[]; voice: string; glossary: string; registryBlock?: string }): Promise<NewsletterDraft> }
 
 export class ClaudeNewsletterBuilder implements NewsletterBuilder {
-  async build(input: { substance: Substance; deckSections: string[]; voice: string; glossary: string }): Promise<NewsletterDraft> {
+  async build(input: { substance: Substance; deckSections: string[]; voice: string; glossary: string; registryBlock?: string }): Promise<NewsletterDraft> {
     const s = input.substance;
-    const prompt = `${input.voice}${input.glossary}
+    const prompt = `${input.voice}${input.glossary}${input.registryBlock ? `\n${input.registryBlock}` : ""}
 
 Write a NEWSLETTER for ${s.company.legal_name} (${s.company.ticker ?? "unlisted"}) — conversational, a discussion of the
 outlook and positioning. Lead with VALUE and honest risk. Keep it TIGHT and readable — aim for ~500-800 words total across
@@ -50,8 +50,8 @@ Return JSON: {"title","opening","body","watching","embedded_slides":["section",.
 }
 
 /** Assemble the final Substack-ready Markdown with fixed §6.6 sections + auto-appended disclosure/sources. */
-export async function buildNewsletter(substance: Substance, deck: Deck, builder: NewsletterBuilder = new ClaudeNewsletterBuilder()): Promise<Newsletter> {
-  const draft = await builder.build({ substance, deckSections: deck.slides.map((sl) => sl.section), voice: HOUSE_VOICE, glossary: await glossaryBlock() });
+export async function buildNewsletter(substance: Substance, deck: Deck, builder: NewsletterBuilder = new ClaudeNewsletterBuilder(), registryBlock?: string): Promise<Newsletter> {
+  const draft = await builder.build({ substance, deckSections: deck.slides.map((sl) => sl.section), voice: HOUSE_VOICE, glossary: await glossaryBlock(), registryBlock });
   if (draft.glossary.length) await recordGlossary(draft.glossary);
 
   const sources = sourceList(substance).map((x) => `${x.n}. ${x.origin}${x.title ? ` — ${x.title}` : ""}${x.url ? ` (${x.url})` : ""}`).join("\n");

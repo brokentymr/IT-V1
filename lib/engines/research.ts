@@ -9,6 +9,7 @@
  * adversarial verification. Injectable so the engines stay deterministic in tests.
  */
 import { z } from "zod";
+import { Risk, InvalidationTrigger } from "../types";
 import { completeJSON, CostCeilingError } from "../llm/client";
 import { RESOLUTION_VERDICTS } from "./areas_of_interest";
 import { deepenToConfidence, type DeepenSteps, type DeepeningTrace } from "./deepen";
@@ -48,6 +49,11 @@ export const ThesisSynthesis = z.object({
   // this is where lens disagreement is adjudicated instead of averaged (pipeline upgrade §4).
   key_debates: z.array(KeyDebate).default([]),
   invalidation_triggers: z.array(z.string()).min(1),
+  // Control P10: risks & triggers as one typed, joined system — each risk names its mechanism/severity
+  // and points at the trigger that would confirm it; each trigger carries a verifiable disclosure.
+  // (The legacy string[] invalidation_triggers above is kept for backward compat.)
+  risks: z.array(Risk).default([]),
+  triggers: z.array(InvalidationTrigger).default([]),
   conviction: z.number().int().min(1).max(5),
   claims_to_verify: z.array(z.string()).default([]),
 });
@@ -236,7 +242,9 @@ Do not present a prior as if it were grounded. JSON:
     // and, when the lenses disagree materially, force it to RULE rather than average.
     const digest = claimsDigest(panel);
     const divergence = divergenceNote(panel);
-    const prompt = `You are the head of research. Synthesize the desk's panel into the house view. Your job is to ADJUDICATE, not average: where the lenses disagree, rule on it. A dispute over a FACT (is a figure real, what is the share) is settled against the evidence — decide and say which lens is right. A dispute over JUDGMENT (is a margin durable) is OWNED as a key_debate with the bull case, the bear case, and your lean. Rely on GROUNDED claims for the confident thesis; treat "prior" claims as unverified and put them in claims_to_verify rather than the thesis. Keep long_form to ~5 sentences; each list to at most 5 short items; at most 3 key_debates. Invalidation triggers MUST be specific and measurable.${divergence ? `\n\n${divergence}` : ""}${focusNote(focus)}
+    const prompt = `You are the head of research. Synthesize the desk's panel into the house view. Your job is to ADJUDICATE, not average: where the lenses disagree, rule on it. A dispute over a FACT (is a figure real, what is the share) is settled against the evidence — decide and say which lens is right. A dispute over JUDGMENT (is a margin durable) is OWNED as a key_debate with the bull case, the bear case, and your lean. Rely on GROUNDED claims for the confident thesis; treat "prior" claims as unverified and put them in claims_to_verify rather than the thesis. Keep long_form to ~5 sentences; each list to at most 5 short items; at most 3 key_debates. Invalidation triggers MUST be specific and measurable.
+
+Then express risks and triggers as ONE JOINED SYSTEM. For "risks": each is a distinct downside with a short id ("r1","r2",...), a title, the MECHANISM by which it hurts the thesis, an optional quantified_impact (e.g. "−300bps gross margin", or null), a severity of "low"|"medium"|"high", and a linked_trigger_id pointing at the trigger below that would confirm it (or null). For "triggers": each has a short id ("t1","t2",...), the measurable condition, and a DISCLOSURE — the specific, verifiable observation to look for (e.g. "10-Q segment revenue for Data Center declines QoQ", "management withdraws FY guidance on the earnings call"). Every risk that can be confirmed should link to a trigger, and every trigger should be linked from a risk and carry a disclosure.${divergence ? `\n\n${divergence}` : ""}${focusNote(focus)}
 
 ${block}
 
@@ -249,7 +257,10 @@ ${digest}
 Return JSON:
 {"one_liner": string, "long_form": string, "actual_vs_expected": string, "tensions": [string],
  "key_debates": [{"question": string, "bull": string, "bear": string, "lean": string}],
- "invalidation_triggers": [string], "conviction": int 1-5, "claims_to_verify": [string]}`;
+ "invalidation_triggers": [string],
+ "risks": [{"id": string, "title": string, "mechanism": string, "quantified_impact": string|null, "severity": "low|medium|high", "linked_trigger_id": string|null}],
+ "triggers": [{"id": string, "condition": string, "disclosure": string, "source_ref": null}],
+ "conviction": int 1-5, "claims_to_verify": [string]}`;
     return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 3000 });
   }
 
