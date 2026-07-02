@@ -36,6 +36,7 @@ import { detectSurprises, surpriseBriefing, type Observation } from "./surprise"
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 import { fetchTranscript, fetchMarketData, externalBlock } from "./external_evidence";
+import { resolveTranscriptSource, transcriptEvidenceBlock, type TranscriptSource } from "../sources/transcript";
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
 import { buildBasisBlock, reconcileBases, scanUnlabeledBasis } from "../financials/basis";
@@ -262,6 +263,7 @@ export async function runCoveragePass(opts: {
   focusOverride?: string[]; // per-run research focus (chat "Deepen research now"); merged, not persisted
   autoCommit?: (input: AutoCommitInput) => Promise<AutoCommitResult>; // Workstream C; omit to skip publish
   positioningDesk?: PositioningDesk; // pipeline upgrade: the decision engine; omit to skip (tests/eval)
+  transcriptSource?: TranscriptSource; // real verbatim transcript provider; omit → resolve from config/env (degrades)
 }): Promise<CoverageResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -493,12 +495,28 @@ export async function runCoveragePass(opts: {
     }
   }
 
-  // W2 + W7: earnings-call transcript highlights + third-party market/pricing data (Perplexity-sourced,
-  // cited). Sourced passages the verifier can cite (W4), grounding management-commentary/pricing/share
-  // claims the filing alone doesn't establish. Best-effort; skipped without Perplexity.
+  // W2 — earnings-call transcript. PREFER a real, verbatim transcript (a configured provider such as
+  // FMP) so the desk reads the actual spoken narrative + forward guidance and cites primary passages;
+  // fall back to the Perplexity SUMMARY only when no transcript provider is configured or it has no
+  // transcript for this name. This is what turns the call from "summarized" into "grounded".
+  let transcriptMeta: { provider: string; date: string | null; url: string | null; event_type: string } | null = null;
+  const transcriptSource = opts.transcriptSource ?? resolveTranscriptSource();
+  if (transcriptSource) {
+    const tr = await transcriptSource.earningsTranscript(company.primary_ticker).catch(() => null);
+    if (tr?.ok && tr.data) {
+      evidenceForDesk = `${evidenceForDesk}\n\n${transcriptEvidenceBlock(tr.data)}`;
+      transcriptMeta = { provider: tr.data.provider, date: tr.data.date, url: tr.data.url, event_type: tr.data.event_type };
+      console.log(`[coverage] ${company.primary_ticker} transcript: ${tr.data.provider} verbatim${tr.data.date ? ` (${tr.data.date})` : ""}`);
+    } else {
+      console.log(`[coverage] ${company.primary_ticker} transcript provider returned nothing (${tr?.missing.join("; ") ?? "n/a"}); falling back to summary`);
+    }
+  }
+
+  // W2 fallback + W7: Perplexity earnings-call SUMMARY (only when no verbatim transcript landed) + the
+  // third-party market/pricing data. Best-effort; skipped without Perplexity.
   if (opts.perplexity) {
     const ext = externalBlock([
-      await fetchTranscript(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker }),
+      transcriptMeta ? null : await fetchTranscript(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker }),
       await fetchMarketData(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector }),
     ]);
     if (ext) evidenceForDesk = `${evidenceForDesk}\n\n${ext}`;
@@ -726,6 +744,7 @@ export async function runCoveragePass(opts: {
       events: {
         filings: [{ accession: opts.accession, form: opts.formType ?? null, url: filingUrl ?? null }],
         ...(releaseUrl ? { earnings_release: { url: releaseUrl, ingested: !!releaseText } } : {}),
+        ...(transcriptMeta ? { transcript: transcriptMeta } : {}),
       },
     };
 
