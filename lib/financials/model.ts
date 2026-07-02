@@ -74,9 +74,94 @@ function fiscalPeriodLabel(fp: string | null, fy: number | null, end: string | n
   return fp === "FY" ? `FY${year ?? "?"}` : `${fp} ${year ?? "?"}`;
 }
 
+type Pv = XbrlUnitValue & { concept: string };
+
+/** Duration of an XBRL period in days, or null for an instant (stock) value with no start. */
+function durationDays(v: { start?: string | null; end: string }): number | null {
+  if (!v.start) return null;
+  return (Date.parse(`${v.end}T00:00:00Z`) - Date.parse(`${v.start}T00:00:00Z`)) / 86_400_000;
+}
+const QUARTER_MAX_DAYS = 100;
+const isQuarterLen = (v: { start?: string | null; end: string }): boolean => {
+  const d = durationDays(v);
+  return d != null && d >= 80 && d <= QUARTER_MAX_DAYS;
+};
+
+/** Order values accession-matched first, then latest period-end — the value THIS filing reported wins. */
+function sortByAccnThenEnd(values: Pv[], accession: string | null): Pv[] {
+  const want = accession ? normAccn(accession) : null;
+  return [...values].sort((a, b) => {
+    if (want) {
+      const am = normAccn(a.accn) === want ? 0 : 1;
+      const bm = normAccn(b.accn) === want ? 0 : 1;
+      if (am !== bm) return am - bm;
+    }
+    return a.end < b.end ? 1 : -1;
+  });
+}
+
+/** A period-consistent flow value: value + the period it actually covers, and whether we derived it. */
+interface FlowPick { val: number; start: string | null; end: string; fy: number | null; fp: string | null; form: string | null; accn: string | null; derived: boolean }
+
+const toFlowPick = (v: Pv, derived: boolean, start?: string | null, val?: number): FlowPick => ({
+  val: val ?? v.val, start: start !== undefined ? start : (v.start ?? null), end: v.end,
+  fy: v.fy ?? null, fp: v.fp ?? null, form: v.form ?? null, accn: v.accn ?? null, derived,
+});
+
+/**
+ * The flow value for the fiscal QUARTER ending at `targetEnd`.
+ *
+ * Income-statement items tag the 3-month value directly, so we use it. Cash-flow-statement items
+ * (OCF, capex) are reported ONLY as fiscal-year-to-date in a 10-Q — a Q3 filing's OCF is the 9-month
+ * cumulative — so the quarter is isolated by subtracting the immediately-prior YTD (same fiscal-year
+ * start). This is the fix for the Micron defect where a 9-month $45.7B OCF was read as the quarter.
+ */
+function quarterFlow(values: Pv[], targetEnd: string, accession: string | null): FlowPick | null {
+  const atEnd = sortByAccnThenEnd(values.filter((v) => v.end === targetEnd), accession);
+  if (!atEnd.length) return null;
+  const direct = atEnd.find(isQuarterLen);
+  if (direct) return toFlowPick(direct, false);
+  // No 3-month tag → take the shortest YTD ending here and subtract the prior YTD (same FY start).
+  const ytd = atEnd
+    .filter((v) => v.start && (durationDays(v) ?? 0) > QUARTER_MAX_DAYS)
+    .sort((a, b) => (durationDays(a) ?? 0) - (durationDays(b) ?? 0))[0];
+  if (!ytd) return null;
+  const prior = [...values]
+    .filter((v) => v.start === ytd.start && v.end < ytd.end)
+    .sort((a, b) => (a.end < b.end ? 1 : -1))[0];
+  // No earlier YTD to subtract → this IS the first fiscal quarter (Q1); use it verbatim.
+  return prior ? toFlowPick(ytd, true, prior.end, ytd.val - prior.val) : toFlowPick(ytd, false);
+}
+
+/** The flow value for the full period ending at `targetEnd` — used for annual passes (10-K): the
+ *  longest-duration value reported for that end (the fiscal year), accession-matched first. */
+function periodFlow(values: Pv[], targetEnd: string, accession: string | null): FlowPick | null {
+  const atEnd = sortByAccnThenEnd(values.filter((v) => v.end === targetEnd), accession);
+  if (!atEnd.length) return null;
+  const longest = [...atEnd].sort((a, b) => (durationDays(b) ?? 0) - (durationDays(a) ?? 0))[0];
+  return toFlowPick(longest, false);
+}
+
+/** The value-end nearest to `targetEnd − backDays`, within ~6 weeks — the comparable prior-period end. */
+function nearestEnd(values: Pv[], targetEnd: string, backDays: number): string | null {
+  const target = Date.parse(`${targetEnd}T00:00:00Z`) - backDays * 86_400_000;
+  let best: string | null = null;
+  let bestGap = Infinity;
+  for (const v of values) {
+    const gap = Math.abs(Date.parse(`${v.end}T00:00:00Z`) - target);
+    if (gap < bestGap) { bestGap = gap; best = v.end; }
+  }
+  return bestGap <= 45 * 86_400_000 ? best : null;
+}
+
 /**
  * Extract a filing's line items from XBRL facts. Grounded to `accession` when supplied.
  * Missing concepts are simply absent (degrade, don't throw) — the caller records them as gaps.
+ *
+ * Flow metrics are made period-consistent: the reporting period is read off the anchor (revenue),
+ * and every income/cash-flow item is resolved to that SAME period (the quarter for a 10-Q, the year
+ * for a 10-K). This prevents a fiscal-YTD figure (e.g. 9-month OCF) from being read as the quarter and
+ * compared against a 3-month revenue.
  */
 export function extractStatements(
   facts: CompanyFacts,
@@ -87,22 +172,50 @@ export function extractStatements(
   const line_items: Record<string, LineItem> = {};
   const missing: string[] = [];
 
+  // Establish the reporting period from the anchor income-statement item (revenue → net income).
+  const anchorSpec = config.metrics.find((m) => m.key === "revenue") ?? config.metrics.find((m) => m.key === "net_income");
+  const anchorValues = anchorSpec ? valuesFor(facts, anchorSpec) : [];
+  const anchor = anchorSpec ? pick(anchorValues, accession) : null;
+  const targetEnd = anchor?.end ?? null;
+  // Quarterly pass iff a ~3-month value ends at the target period (a 10-Q); a 10-K's anchor is annual.
+  const quarterlyPass = !!(targetEnd && anchorValues.some((v) => v.end === targetEnd && isQuarterLen(v)));
+  const priorEnd = targetEnd ? nearestEnd(anchorValues, targetEnd, 365) : null;
+  const flowAt = (values: Pv[], end: string): FlowPick | null =>
+    quarterlyPass ? quarterFlow(values, end, accession) : periodFlow(values, end, accession);
+
   for (const spec of config.metrics) {
     const values = valuesFor(facts, spec);
-    const chosen = pick(values, accession);
+
+    if (spec.kind === "stock") {
+      const chosen = pick(values, accession);
+      if (!chosen) { missing.push(spec.key); continue; }
+      line_items[spec.key] = {
+        key: spec.key, label: spec.label, value: chosen.val, unit: spec.unit,
+        period_end: chosen.end, period_start: chosen.start ?? null,
+        fy: chosen.fy ?? null, fp: chosen.fp ?? null, form: chosen.form ?? null,
+        accession: chosen.accn ?? null, yoy: null,
+      };
+      continue;
+    }
+
+    // Flow metric: resolve to the anchor's period. When there is no anchor (no revenue/NI in the
+    // facts) fall back to the raw latest-by-end pick so extraction still degrades gracefully.
+    const chosen: FlowPick | null = targetEnd
+      ? flowAt(values, targetEnd)
+      : (() => { const p = pick(values, accession); return p ? toFlowPick(p, false) : null; })();
     if (!chosen) { missing.push(spec.key); continue; }
-    const prior = spec.kind === "flow" ? priorYear(values, chosen) : null;
+    const prior = priorEnd ? flowAt(values, priorEnd) : null;
     line_items[spec.key] = {
       key: spec.key,
       label: spec.label,
       value: chosen.val,
       unit: spec.unit,
       period_end: chosen.end,
-      period_start: chosen.start ?? null,
-      fy: chosen.fy ?? null,
-      fp: chosen.fp ?? null,
-      form: chosen.form ?? null,
-      accession: chosen.accn ?? null,
+      period_start: chosen.start,
+      fy: chosen.fy,
+      fp: chosen.fp,
+      form: chosen.form,
+      accession: chosen.accn,
       yoy: prior && prior.val !== 0
         ? { prior_value: prior.val, prior_end: prior.end, change_pct: (chosen.val - prior.val) / Math.abs(prior.val) }
         : null,

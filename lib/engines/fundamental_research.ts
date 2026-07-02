@@ -38,6 +38,7 @@ import { fetchTranscript, fetchMarketData, externalBlock } from "./external_evid
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
 import { computeTrends } from "../financials/trends";
+import { checkIdentities, identityLog } from "../financials/identity";
 import { checkConsistency, type ComputedFacts } from "./consistency";
 import { positioningComplete, type PositioningDesk, type PositioningDecision } from "./positioning";
 
@@ -256,6 +257,15 @@ export async function runCoveragePass(opts: {
   const { line_items, missing } = extractStatements(facts.data, { accession: opts.accession, config });
   const model = buildModel(line_items);
 
+  // 1b. Deterministic accounting-identity gate (MU-audit control P1). Runs BEFORE any narrative reasons
+  // over the numbers: a hard failure means the figures aren't trustworthy, so implicated metrics are
+  // kept out of the surprise investigator (no fabricated explanation of a broken number) and the thesis
+  // is held for human review rather than auto-published. The report is stamped on the snapshot as the
+  // "gate executed" audit log.
+  const integrity = checkIdentities(model);
+  console.log(`[coverage] ${company.primary_ticker} ${identityLog(integrity)}`);
+  const integritySuppressed = new Set(integrity.violations.flatMap((x) => x.metrics));
+
   // 2. Prior snapshot's model → diff (first-class "what changed").
   const prior = await query<{ model: FinancialModel | null }>(
     "SELECT content->'fundamentals'->'model' AS model FROM canonical_snapshots WHERE company_id = $1 ORDER BY as_of DESC, created_at DESC LIMIT 1",
@@ -325,7 +335,10 @@ export async function runCoveragePass(opts: {
   // 3d-bis. Surprise investigation (pipeline upgrade): flag figures that deviate sharply from the
   // company's own history or consensus, and instruct the desk to EXPLAIN them rather than dismiss
   // them as errors. This is what stops the desk from rejecting a true, market-moving print.
-  const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null));
+  // Metrics that failed the identity gate are NOT fed to the investigator: a period-mismatched OCF is
+  // an extraction error, not a "surprise to explain" — feeding it here is what produced the fabricated
+  // $18B-SCA-deposit narrative in the Micron report (MU-audit control P2).
+  const surprises = detectSurprises(buildSurpriseObservations(model, prior.rows[0]?.model ?? null, integritySuppressed));
   const briefing = surpriseBriefing(surprises);
 
   // 3d-ter. Model coherence (pipeline upgrade §5): do the drivers and the Monte Carlo tell the same
@@ -547,6 +560,7 @@ export async function runCoveragePass(opts: {
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
       levers, // ROE/DuPont + balance-sheet health, computed from XBRL (grounded to the filing)
+      data_integrity: integrity, // MU-audit P1: the accounting-identity gate's execution log for this snapshot
       trends, // W3: multi-year trend/cyclicality context from the filing series
       ...(consistency.length ? { consistency } : {}), // W6: claims that conflict with the computed figures
       ...(demand ? { demand } : {}), // demand-side levers extracted from the primary filing text
@@ -619,7 +633,8 @@ export async function runCoveragePass(opts: {
   // no variant view or no catalysts) are both held for the human checkpoint, never auto-published.
   const positioningOk = positioning ? positioningComplete(positioning).complete : true;
   // A claim that contradicts the computed figures (W6) is a hard hold, like a standing contradiction.
-  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0;
+  // A hard accounting-identity failure (MU-audit P1) is likewise never auto-published — held for review.
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0 && integrity.ok;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;
@@ -681,10 +696,12 @@ function buildEvidence(
 function buildSurpriseObservations(
   model: FinancialModel,
   priorModel: FinancialModel | null,
+  suppress: Set<string> = new Set(),
 ): Observation[] {
   const obs: Observation[] = [];
 
   for (const [key, li] of Object.entries(model.line_items)) {
+    if (suppress.has(key)) continue; // identity-gate: don't investigate a figure known to be broken
     if (li.yoy && Number.isFinite(li.yoy.change_pct)) {
       const growth = li.yoy.change_pct;
       const priorYear = growth !== -1 ? li.value / (1 + growth) : 0;
