@@ -16,16 +16,24 @@ export interface ExternalEvidence {
   text: string;
 }
 
-/** W2 — earnings-call highlights: management's quantified commentary on demand, pricing, capacity, guidance. */
+/** W2 — earnings-call highlights: management's quantified commentary on demand, pricing, capacity, guidance.
+ *  Targets the specific gap the 10-Q/XBRL cannot fill: management's total COMMITTED-VOLUME characterization
+ *  (which, unlike the narrow ASC 606 RPO, includes the market/price-band agreements), the forward guidance,
+ *  and the reasoning behind it — the narrative the desk must read to judge forward guidance. */
 export async function fetchTranscript(perplexity: AskText, company: { legal_name: string; ticker: string | null }): Promise<ExternalEvidence | null> {
   const a = await perplexity
     .askText({
-      question: `Summarize ${company.legal_name} (${company.ticker ?? "n/a"})'s MOST RECENT earnings call. Give management's SPECIFIC, quantified commentary on: demand / orders / backlog, pricing and ASPs, capacity / utilization, and forward guidance. Cite figures and dates. Be concise.`,
-      maxTokens: 700,
+      question: `From ${company.legal_name} (${company.ticker ?? "n/a"})'s MOST RECENT earnings call (prepared remarks AND Q&A), report management's SPECIFIC, quantified statements on:
+1. FORWARD GUIDANCE for next quarter/year (revenue, margin, EPS ranges) and the KEY ASSUMPTIONS behind it.
+2. Total COMMITTED VOLUME / long-term or strategic customer agreements — the number of agreements, the aggregate committed dollar value or volume, and how it is characterized (e.g. take-or-pay, minimum pricing). Distinguish this from the GAAP "remaining performance obligations" figure if both are mentioned.
+3. Demand / bookings / backlog, pricing and ASP direction, capacity / utilization / sold-out status.
+4. The NARRATIVE management is painting about durability vs cyclicality.
+Give exact figures, dates, and who said them (CEO/CFO). Quote where possible. Cite sources.`,
+      maxTokens: 1100,
       purpose: "research.transcript",
     })
     .catch(() => null);
-  return a?.ok && a.text ? { label: "Earnings-call highlights (transcript — sourced, cite as 'transcript')", text: a.text } : null;
+  return a?.ok && a.text ? { label: "Earnings-call: guidance, committed-volume & narrative (transcript — sourced, cite as 'transcript')", text: a.text } : null;
 }
 
 /** W7 — third-party market/pricing data: ASP trends and market share from TrendForce/Gartner/IDC-type sources. */

@@ -20,7 +20,7 @@ import {
   metricYoYGrowths, netMarginLevels, priorYearBaseForNext, type FinancialModel, type SnapshotDiff,
 } from "../financials/model";
 import { simulateScenario, mulberry32, type ScenarioOutput } from "../financials/montecarlo";
-import { concentrationExcerpt, extractMdaSection, keywordExcerpts } from "../financials/filing_text";
+import { concentrationExcerpt, extractMdaSection, keywordExcerpts, earningsReleaseExcerpt } from "../financials/filing_text";
 import { FUNDAMENTALS_CONFIG, PBEAT_CONFIG, type FundamentalsConfig } from "../config/fundamentals";
 import { trailingBeatRate, pbeatDivergenceNote } from "../financials/pbeat_divergence";
 import { DESK_CONFIG, type DeskConfig } from "../config/desk";
@@ -319,6 +319,25 @@ export async function runCoveragePass(opts: {
     );
   }
 
+  // 3b-bis. Earnings release (8-K Item 2.02 EX-99.1) — the management NARRATIVE + forward GUIDANCE the
+  // quarterly call paints, which the 10-Q/XBRL do not carry (e.g. total committed volume across strategic
+  // agreements vs the narrow ASC 606 RPO). Free, primary (EDGAR). Best-effort; the pass degrades without it.
+  let releaseText: string | null = null;
+  let releaseUrl: string | null = null;
+  if (company.cik) {
+    try {
+      const er = await sec.earningsRelease(company.cik);
+      if (er.ok && er.data) {
+        releaseUrl = er.data.url;
+        const doc = await sec.fetchFilingDocument(er.data.url).catch(() => null);
+        releaseText = doc?.ok && doc.data ? earningsReleaseExcerpt(doc.data, config.mdaTextBudget) : null;
+      }
+      console.log(`[coverage] ${company.primary_ticker} earnings release: ${releaseText ? `ingested (${releaseUrl})` : `unavailable — ${er.missing.join("; ")}`}`);
+    } catch (e) {
+      console.warn(`[coverage] earnings release fetch failed: ${(e as Error).message}`);
+    }
+  }
+
   // 3c. MD&A drivers (#3) → Monte Carlo next-period scenario (#4). Both best-effort.
   let drivers: Driver[] = [];
   if (html) {
@@ -406,7 +425,13 @@ export async function runCoveragePass(opts: {
   const basisBrief = `Reporting basis (control P11): line-item figures are GAAP; free cash flow is adjusted (company definition: operating cash flow − capex).`
     + (basisBlock.reconciliations.length ? ` GAAP vs non-GAAP: ${basisBlock.reconciliations.map((r) => `${r.metric} ${r.gaap_label} ${r.gaap_value} vs ${r.non_gaap_label} ${r.non_gaap_value}`).join("; ")}.` : "");
   const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}\n\n${basisBrief}${demandBrief ? `\n\n${demandBrief}` : ""}${trendBrief}`;
-  const evidence = coherence.agree ? withLevers : `${withLevers}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
+  // The earnings-release narrative + guidance is PRIMARY evidence (EDGAR 8-K) — read it to judge the
+  // forward guidance and to characterize the numbers (e.g. committed volume vs the narrow ASC 606 RPO).
+  const releaseBlock = releaseText
+    ? `\n\nEARNINGS RELEASE — management narrative + forward guidance (8-K Item 2.02, PRIMARY/EDGAR — cite as 'earnings release'):\n${releaseText}`
+    : "";
+  const withRelease = `${withLevers}${releaseBlock}`;
+  const evidence = coherence.agree ? withRelease : `${withRelease}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
   // the Workstream-C deepening loop. When verification is short of the bar, `enrich` gap-fills on the
@@ -551,7 +576,12 @@ export async function runCoveragePass(opts: {
     ...research.panel.flatMap((p) => p.claims.map((c) => c.statement)),
     ...drivers.flatMap((d) => [d.framing, d.quote ?? ""]),
   ].filter((s): s is string => !!s);
-  const disclosureText = html ? keywordExcerpts(html, DISCLOSURE_KEYWORDS, DISCLOSURE_TEXT_BUDGET) : null;
+  // The scorer reads the 10-Q excerpt AND the earnings release, so guidance / committed-volume / SCA
+  // disclosures that live only in the release are scored as covered (and their absence flagged).
+  const disclosureText = [
+    html ? keywordExcerpts(html, DISCLOSURE_KEYWORDS, DISCLOSURE_TEXT_BUDGET) : null,
+    releaseText,
+  ].filter(Boolean).join("\n…\n") || null;
   const scorecard = scoreDisclosureCoverage({
     formType: opts.formType ?? null, model, demand, drivers, claimTexts, filingText: disclosureText,
   });
@@ -693,7 +723,10 @@ export async function runCoveragePass(opts: {
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
       thesis,
-      events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: filingUrl ?? null }] },
+      events: {
+        filings: [{ accession: opts.accession, form: opts.formType ?? null, url: filingUrl ?? null }],
+        ...(releaseUrl ? { earnings_release: { url: releaseUrl, ingested: !!releaseText } } : {}),
+      },
     };
 
     await client.query(

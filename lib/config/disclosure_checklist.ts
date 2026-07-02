@@ -120,6 +120,19 @@ export const DISCLOSURE_CHECKLIST: ChecklistItem[] = [
     detect: { kind: "text_regex", pattern: "remaining performance obligation|\\bRPO\\b|\\bbacklog\\b" },
   },
   {
+    // The demand-thesis headline that lives on the CALL / in the earnings release, NOT the 10-Q: the total
+    // committed volume across long-term/strategic customer agreements. Distinct from the narrow ASC 606 RPO
+    // (which excludes market/price-band agreements) — when management characterizes committed volume, the
+    // analysis must capture it, or we publish the GAAP floor as if it were the whole demand picture.
+    key: "management_commitment",
+    label: "Committed volume / strategic customer agreements (management characterization)",
+    severity: "expected",
+    applies_to: ["10-K", "10-Q", "8-K"],
+    conditional: "if_disclosed",
+    disclosureSignal: /strategic customer agreement|long-term (?:supply|customer) agreement|take-or-pay|committed volume|multi-year (?:supply|customer|contract)/i,
+    detect: { kind: "text_regex", pattern: "strategic customer agreement|long-term agreement|take-or-pay|committed volume|committed .* agreement|multi-year" },
+  },
+  {
     key: "buyback_dividend",
     label: "Buyback / dividend",
     severity: "expected",
@@ -152,6 +165,11 @@ export const DISCLOSURE_KEYWORDS: string[] = [
   "we expect",
   "remaining performance obligation",
   "backlog",
+  "strategic customer",
+  "long-term agreement",
+  "take-or-pay",
+  "committed",
+  "multi-year",
   "repurchase",
   "buyback",
   "dividend",

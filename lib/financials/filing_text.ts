@@ -46,6 +46,26 @@ export function keywordExcerpts(html: string, keywords: string[], budget: number
   return hits.join("\n…\n").slice(0, budget);
 }
 
+/** Keywords that locate the guidance + commitment language inside an earnings press release. */
+const RELEASE_KEYWORDS = [
+  "guidance", "outlook", "we expect", "for the fourth quarter", "for the next quarter", "for the first quarter",
+  "strategic customer", "long-term agreement", "multi-year", "take-or-pay", "committed", "commitments",
+  "remaining performance obligation", "backlog", "record", "gross margin",
+];
+
+/**
+ * Bounded excerpt of an earnings press release (8-K Item 2.02 EX-99.1): the LEAD narrative (headline +
+ * CEO/CFO quotes + highlights come first in a release) plus keyword windows around the guidance and
+ * strategic-agreement/committed-volume language. This is the management NARRATIVE + forward GUIDANCE the
+ * quarterly call paints — the exact content the 10-Q and XBRL don't carry.
+ */
+export function earningsReleaseExcerpt(html: string, budget: number): string {
+  const text = htmlToText(html);
+  const lead = text.slice(0, Math.floor(budget * 0.5));
+  const kw = keywordExcerpts(html, RELEASE_KEYWORDS, Math.ceil(budget * 0.5));
+  return `${lead}${kw ? `\n…\n${kw}` : ""}`.slice(0, budget);
+}
+
 const MDA_START = /Management.{0,3}s Discussion and Analysis/gi;
 const MDA_END = /(Quantitative and Qualitative Disclosures|Controls and Procedures|Item\s+[34][A-Za-z]?\b|Financial Statements and Supplementary|Legal Proceedings)/i;
 

@@ -66,6 +66,14 @@ export const FUNDAMENTALS_CONFIG: FundamentalsConfig = {
     { key: "accounts_receivable", label: "Accounts receivable", unit: "USD", kind: "stock", tags: ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"] },
     { key: "inventory", label: "Inventory", unit: "USD", kind: "stock", tags: ["InventoryNet"] },
     { key: "accounts_payable", label: "Accounts payable", unit: "USD", kind: "stock", tags: ["AccountsPayableCurrent", "AccountsPayableTradeCurrent"] },
+    // Demand-visibility disclosures (the SCA/LTA thesis). RPO is the ASC 606 tagged figure — deliberately
+    // NARROW: per the rev-rec note it excludes market/price-band agreements and short contracts, so it is a
+    // floor, not the total committed volume management characterizes on the call. Contract liabilities are
+    // customer prepayments/deposits (the deferred-revenue balance). Both are point-in-time (stock).
+    { key: "remaining_performance_obligation", label: "Remaining performance obligations (ASC 606)", unit: "USD", kind: "stock",
+      tags: ["RevenueRemainingPerformanceObligation"] },
+    { key: "contract_liabilities", label: "Contract liabilities (customer deposits / deferred revenue)", unit: "USD", kind: "stock",
+      tags: ["ContractWithCustomerLiability", "ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent"] },
   ],
 };
 

@@ -142,3 +142,27 @@ describe("period-consistent flow extraction (MU quarterization)", () => {
     expect(line_items.operating_cash_flow.value).toBeLessThan(line_items.revenue.value);
   });
 });
+
+describe("demand-visibility extraction (Layer 1: RPO + contract liabilities)", () => {
+  const ACC = "0000723125-26-000015";
+  const facts: CompanyFacts = {
+    cik: "0000723125", entity_name: "MICRON TECHNOLOGY INC",
+    facts: { "us-gaap": {
+      // ASC 606 RPO is an instant (stock) balance as of period end — no start.
+      RevenueRemainingPerformanceObligation: { units: { USD: [
+        { end: "2026-05-28", val: 5_000_000_000, fy: 2026, fp: "Q3", form: "10-Q", accn: ACC },
+      ] } },
+      ContractWithCustomerLiabilityCurrent: { units: { USD: [
+        { end: "2026-05-28", val: 420_000_000, fy: 2026, fp: "Q3", form: "10-Q", accn: ACC },
+      ] } },
+    } },
+  };
+
+  it("extracts RPO as a grounded, GAAP-labeled stock figure", () => {
+    const { line_items } = extractStatements(facts, { accession: ACC });
+    expect(line_items.remaining_performance_obligation.value).toBe(5_000_000_000);
+    expect(line_items.remaining_performance_obligation.basis).toBe("gaap");
+    expect(line_items.remaining_performance_obligation.label).toMatch(/ASC 606/);
+    expect(line_items.contract_liabilities.value).toBe(420_000_000);
+  });
+});

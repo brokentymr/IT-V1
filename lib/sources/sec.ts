@@ -101,6 +101,7 @@ export interface FilingRef {
   report_date: string | null; // period of report
   primary_document: string; // e.g. "aapl-20240928.htm"
   url: string | null;       // resolved primary-document URL; null when EDGAR omits the primary document
+  items: string | null;     // 8-K item codes, e.g. "2.02,9.01" (Results of Operations) — null for other forms
 }
 
 /** Build the primary-document URL for a filing (spec §9.2 archival reference). */
@@ -280,6 +281,7 @@ export class SecAdapter {
           report_date: (recent.reportDate?.[i] as string) || null,
           primary_document: primaryDocument,
           url: primaryDocument ? filingDocUrl(id, accession, primaryDocument) : null,
+          items: (recent.items?.[i] as string) || null,
         });
       }
       return { ok: true, data: out, missing: [], provenance: stamp };
@@ -297,6 +299,46 @@ export class SecAdapter {
   async primaryDocUrl(cik: string | number, accession: string): Promise<string | null> {
     const filings = await this.recentFilings(cik).catch(() => null);
     return filings?.data?.find((f) => f.accession === accession)?.url ?? null;
+  }
+
+  /**
+   * Resolve the earnings press-release exhibit (EX-99.1) inside an 8-K accession via its archive index.
+   * The 8-K's primary document is the cover body; the release (with management's narrative + the
+   * next-quarter guidance) is a separate EX-99.1 htm. Returns null when the exhibit can't be identified
+   * (we never guess the 8-K body itself, to avoid ingesting a boilerplate cover as the release).
+   */
+  async pressReleaseDoc(cik: string | number, accession: string): Promise<string | null> {
+    const base = `https://www.sec.gov/Archives/edgar/data/${cikBare(cik)}/${accession.replace(/-/g, "")}`;
+    const { status, body } = await this.fetchJson(`${base}/index.json`).catch(() => ({ status: 0, body: null }));
+    const items = (body as { directory?: { item?: Array<{ name?: string }> } } | null)?.directory?.item;
+    if (status !== 200 || !items?.length) return null;
+    const htms = items.map((i) => i.name).filter((n): n is string => !!n && /\.htm$/i.test(n) && !/^R\d+\.htm$/i.test(n));
+    const pr = htms.find((n) => /ex.?99|press.?release|earnings/i.test(n));
+    return pr ? `${base}/${pr}` : null;
+  }
+
+  /**
+   * Find the most recent 8-K that reports results of operations (Item 2.02) — the earnings release — and
+   * resolve its press-release exhibit URL. This is the primary, free (EDGAR) source for the management
+   * NARRATIVE and forward GUIDANCE a quarterly earnings call paints, which the 10-Q/XBRL do not carry.
+   */
+  async earningsRelease(
+    cik: string | number,
+    opts: { item?: string } = {},
+  ): Promise<SourceResult<{ accession: string; filing_date: string; url: string }>> {
+    const item = opts.item ?? "2.02";
+    const stamp: ProvenanceStamp = { origin: ORIGIN, url: SUBMISSIONS_URL(cik10(cik)), retrieved_at: new Date().toISOString() };
+    try {
+      const filings = await this.recentFilings(cik, { forms: ["8-K"] });
+      if (!filings.ok || !filings.data) return { ok: false, data: null, missing: ["8-K submissions unavailable"], provenance: stamp };
+      const rel = filings.data.find((f) => (f.items ?? "").split(/[,\s]+/).includes(item));
+      if (!rel) return { ok: false, data: null, missing: [`no 8-K with item ${item} (earnings release)`], provenance: stamp };
+      const url = await this.pressReleaseDoc(cik, rel.accession);
+      if (!url) return { ok: false, data: null, missing: [`earnings-release exhibit not found in 8-K ${rel.accession}`], provenance: stamp };
+      return { ok: true, data: { accession: rel.accession, filing_date: rel.filing_date, url }, missing: [], provenance: { ...stamp, url } };
+    } catch (err) {
+      return { ok: false, data: null, missing: ["earnings release lookup failed"], provenance: stamp, error: (err as Error).message };
+    }
   }
 
   /** Full XBRL company facts (us-gaap financial concepts) for a CIK. */
