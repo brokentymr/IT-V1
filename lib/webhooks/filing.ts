@@ -5,6 +5,7 @@ import { resolveCompanyId } from "./resolve";
 import { bossQueue } from "../queue/boss";
 import { JOB } from "../queue/types";
 import { putObject } from "../storage/spaces";
+import { SecAdapter } from "../sources/sec";
 import type { BlobStore, Queue, WebhookStatus } from "./types";
 
 const defaultStore: BlobStore = { put: (k, b, c) => putObject(k, b, c) };
@@ -40,11 +41,18 @@ export async function processFilingWebhook(
   const formType =
     typeof payload.form_type === "string" ? payload.form_type
       : typeof payload.formType === "string" ? payload.formType : null;
-  const filingUrl =
+  let filingUrl =
     typeof payload.filing_url === "string" ? payload.filing_url
       : typeof payload.url === "string" ? payload.url : null;
   const filedAt = typeof payload.filed_at === "string" ? payload.filed_at : new Date().toISOString();
   if (!accession) return { status: "bad_request" };
+
+  // Senders don't always include the primary-document URL. Recover it from the accession before we
+  // write provenance + enqueue coverage — without it the coverage pass runs quant-only (no MD&A
+  // drivers, no forward scenario). Best-effort; the coverage pass also backstops this from the DB CIK.
+  if (!filingUrl && typeof payload.cik === "string" && payload.cik) {
+    filingUrl = await new SecAdapter().primaryDocUrl(payload.cik, accession).catch(() => null);
+  }
 
   const store = opts.store ?? defaultStore;
   const queue = opts.queue ?? bossQueue;

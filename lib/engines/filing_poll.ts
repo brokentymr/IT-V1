@@ -70,6 +70,13 @@ export async function runFilingPoll(opts: {
       if (claim.rowCount === 0) continue;
       result.new_filings++;
 
+      if (!f.url) {
+        console.warn(
+          `[poll] ${company.primary_ticker} ${f.form} ${f.accession} has no primary-document URL in EDGAR submissions; ` +
+            `coverage will run quant-only (no MD&A drivers / forward scenario)`,
+        );
+      }
+
       const jobId = await queue
         .enqueue(JOB.COVERAGE_PASS, { company_id: company.id, accession: f.accession, form_type: f.form, filing_url: f.url }, { singletonKey: `coverage:${company.id}:${f.accession}` })
         .catch((e) => { console.warn(`[poll] enqueue failed for ${f.accession}: ${(e as Error).message}`); return null; });

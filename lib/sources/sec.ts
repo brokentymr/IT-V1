@@ -100,7 +100,7 @@ export interface FilingRef {
   filing_date: string;      // YYYY-MM-DD (filed)
   report_date: string | null; // period of report
   primary_document: string; // e.g. "aapl-20240928.htm"
-  url: string;              // resolved primary-document URL
+  url: string | null;       // resolved primary-document URL; null when EDGAR omits the primary document
 }
 
 /** Build the primary-document URL for a filing (spec §9.2 archival reference). */
@@ -279,13 +279,24 @@ export class SecAdapter {
           filing_date: String(recent.filingDate?.[i] ?? ""),
           report_date: (recent.reportDate?.[i] as string) || null,
           primary_document: primaryDocument,
-          url: primaryDocument ? filingDocUrl(id, accession, primaryDocument) : "",
+          url: primaryDocument ? filingDocUrl(id, accession, primaryDocument) : null,
         });
       }
       return { ok: true, data: out, missing: [], provenance: stamp };
     } catch (err) {
       return { ok: false, data: null, missing: ["SEC submissions unreachable"], provenance: stamp, error: (err as Error).message };
     }
+  }
+
+  /**
+   * Resolve a single filing's primary-document URL from its accession (via the submissions feed).
+   * Feeders (the filing webhook, some payloads) don't always carry the URL; this recovers it so the
+   * coverage pass gets the filing text — otherwise the entire qualitative half (drivers, forward
+   * scenario, demand) silently no-ops. Returns null when EDGAR has no primary document for it.
+   */
+  async primaryDocUrl(cik: string | number, accession: string): Promise<string | null> {
+    const filings = await this.recentFilings(cik).catch(() => null);
+    return filings?.data?.find((f) => f.accession === accession)?.url ?? null;
   }
 
   /** Full XBRL company facts (us-gaap financial concepts) for a CIK. */
