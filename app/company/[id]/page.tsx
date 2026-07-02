@@ -46,6 +46,14 @@ interface SnapContent {
     roe?: { roe: number | null; net_margin: number | null; asset_turnover: number | null; equity_multiplier: number | null; driver?: string | null; read: string };
     balance_sheet?: { health: string; read: string; current_ratio: number | null; net_cash: number | null; interest_coverage: number | null; cash_conversion: number | null; free_cash_flow: number | null };
   };
+  demand?: {
+    customers?: Array<{ name: string; share_pct?: number | null; relationship?: string; reliability?: string; note?: string }>;
+    customer_concentration?: string;
+    segments?: Array<{ name: string; revenue_share_pct?: number | null; trend?: string }>;
+    geographic?: Array<{ region: string; revenue_share_pct?: number | null }>;
+    demand_signals?: string;
+    supply_constraints?: string;
+  };
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
@@ -338,6 +346,38 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                   </div>
                 ) : null}
                 <p className="faint" style={{ fontSize: ".72rem", marginTop: ".4rem" }}>Computed from XBRL — citable to the filing.</p>
+              </div>
+            );
+          })() : null}
+
+          {/* Demand & customers (extracted from the primary filing text — citable). */}
+          {content.demand && (content.demand.customers?.length || content.demand.customer_concentration || content.demand.segments?.length || content.demand.demand_signals) ? (() => {
+            const d = content.demand!;
+            const relTone = (r?: string) => (r === "reliable" ? "good" : r === "at_risk" ? "bad" : r === "cyclical" ? "warn" : "");
+            return (
+              <div className="panel">
+                <h2 style={{ marginTop: 0 }}>Demand &amp; customers</h2>
+                {d.customer_concentration ? <p className="muted" style={{ marginTop: 0, fontSize: ".88rem" }}><span className="faint">Concentration: </span>{d.customer_concentration}</p> : null}
+                {d.customers?.length ? (
+                  <table>
+                    <thead><tr><th>Customer</th><th>Share</th><th>Reliability</th><th>Relationship</th></tr></thead>
+                    <tbody>
+                      {d.customers.map((c, i) => (
+                        <tr key={i}>
+                          <td>{c.name}</td>
+                          <td className="mono">{c.share_pct != null ? `${c.share_pct}%` : "—"}</td>
+                          <td>{c.reliability && c.reliability !== "unknown" ? <span className={`tag ${relTone(c.reliability)}`}>{c.reliability}</span> : <span className="faint">—</span>}</td>
+                          <td className="muted" style={{ fontSize: ".82rem" }}>{c.relationship || c.note || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : null}
+                {d.segments?.length ? <p className="muted" style={{ fontSize: ".84rem" }}><span className="faint">Segments: </span>{d.segments.map((s) => `${s.name}${s.revenue_share_pct != null ? ` ${s.revenue_share_pct}%` : ""}${s.trend ? ` (${s.trend})` : ""}`).join(" · ")}</p> : null}
+                {d.geographic?.length ? <p className="muted" style={{ fontSize: ".84rem" }}><span className="faint">Geography: </span>{d.geographic.map((g) => `${g.region}${g.revenue_share_pct != null ? ` ${g.revenue_share_pct}%` : ""}`).join(" · ")}</p> : null}
+                {d.demand_signals ? <p className="muted" style={{ fontSize: ".84rem" }}><span className="faint">Demand signals: </span>{d.demand_signals}</p> : null}
+                {d.supply_constraints ? <p className="muted" style={{ fontSize: ".84rem" }}><span className="faint">Supply: </span>{d.supply_constraints}</p> : null}
+                <p className="faint" style={{ fontSize: ".72rem" }}>Extracted from the filing text — citable to the source.</p>
               </div>
             );
           })() : null}

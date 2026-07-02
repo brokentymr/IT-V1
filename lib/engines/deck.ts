@@ -71,7 +71,9 @@ SUBSTANCE:
 ${facts}
 
 Return JSON: {"slides": [{"section","title","headline","bullets":[..],"metric":{"label","value","sub"}|null,"color","visual"}], "glossary": [{"term","plain_definition"}]}`;
-    return completeJSON({ prompt, schema: DeckNarrative, model: "claude-sonnet-4-6", purpose: "content.deck", maxTokens: 4500 });
+    // 8000, not 4500: the full ordered slide set + glossary was truncating mid-array (JSON parse failed
+    // at ~position 17.6k chars), so content generation failed after a clean research pass.
+    return completeJSON({ prompt, schema: DeckNarrative, model: "claude-sonnet-4-6", purpose: "content.deck", maxTokens: 8000 });
   }
 }
 

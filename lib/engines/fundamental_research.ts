@@ -25,7 +25,7 @@ import { FUNDAMENTALS_CONFIG, type FundamentalsConfig } from "../config/fundamen
 import { DESK_CONFIG, type DeskConfig } from "../config/desk";
 import { llmSpendThisMonth } from "../llm/client";
 import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
-import type { FundamentalsAnalyst } from "./fundamentals_analyst";
+import { demandBriefing, type FundamentalsAnalyst, type DemandProfile } from "./fundamentals_analyst";
 import { ClaudeResearchPanel, type ResearchPanel, type ResearchEnrich } from "./research";
 import type { AutoCommitInput, AutoCommitResult } from "./autocommit";
 import type { NewsAnalyzer } from "./analyzer";
@@ -281,6 +281,22 @@ export async function runCoveragePass(opts: {
       drivers = dr.drivers;
     }
   }
+
+  // Demand/supply extraction (grounding upgrade): pull the demand-side levers — customers, concentration,
+  // segment/geo mix, order/backlog and supply signals — from the PRIMARY filing text. Grounded to the
+  // filing, so the desk reasons over sourced customer facts rather than priors. Best-effort; skipped
+  // when the analyst has no extractDemand (tests) or there's no filing document.
+  let demand: DemandProfile | null = null;
+  if (html && opts.analyst.extractDemand) {
+    const demandText = [concentrationExcerpt(html, config.linkTextBudget), extractMdaSection(html, Math.floor(config.mdaTextBudget / 2))].filter(Boolean).join("\n\n");
+    if (demandText) {
+      demand = await opts.analyst.extractDemand({
+        company: { legal_name: company.legal_name, ticker: company.primary_ticker },
+        filing: { form: opts.formType ?? "Filing" }, text: demandText,
+      }).catch((e) => { console.warn(`[coverage] demand extraction failed: ${(e as Error).message}`); return null; });
+    }
+  }
+
   const scenario = buildScenario(facts.data, model, drivers, mc?.consensus ?? null, company, config, opts.rng);
 
   // 3d. Open areas of interest — the between-filing developments the News Monitor accumulated. The
@@ -303,7 +319,8 @@ export async function runCoveragePass(opts: {
   const levers = computeLevers(model);
 
   const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
-  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}`;
+  const demandBrief = demand ? demandBriefing(demand) : "";
+  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}${demandBrief ? `\n\n${demandBrief}` : ""}`;
   const evidence = coherence.agree ? withLevers : `${withLevers}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
@@ -483,6 +500,7 @@ export async function runCoveragePass(opts: {
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
       levers, // ROE/DuPont + balance-sheet health, computed from XBRL (grounded to the filing)
+      ...(demand ? { demand } : {}), // demand-side levers extracted from the primary filing text
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
       thesis,

@@ -96,11 +96,49 @@ export interface DriverExtractInput {
 export const DriversResult = z.object({ drivers: z.array(Driver).default([]) });
 export type DriversResult = z.infer<typeof DriversResult>;
 
+// ---------- Demand / supply extraction (grounding upgrade: the demand-side levers) ----------
+export const CustomerNote = z.object({
+  name: z.string(),
+  share_pct: z.number().nullable().default(null), // % of revenue, if disclosed
+  relationship: z.string().default(""), // what they buy / the nature of the relationship
+  reliability: z.enum(["reliable", "cyclical", "at_risk", "unknown"]).default("unknown"),
+  note: z.string().default(""),
+});
+export const DemandProfile = z.object({
+  customers: z.array(CustomerNote).default([]),
+  customer_concentration: z.string().default(""), // e.g. "top 3 ≈ 45% of revenue" or "none disclosed"
+  segments: z.array(z.object({ name: z.string(), revenue_share_pct: z.number().nullable().default(null), trend: z.string().default("") })).default([]),
+  geographic: z.array(z.object({ region: z.string(), revenue_share_pct: z.number().nullable().default(null) })).default([]),
+  demand_signals: z.string().default(""), // orders / backlog / bookings / sell-through
+  supply_constraints: z.string().default(""), // capacity / lead-time / allocation
+});
+export type DemandProfile = z.infer<typeof DemandProfile>;
+
+export interface DemandExtractInput {
+  company: { legal_name: string; ticker: string };
+  filing: { form: string };
+  text: string; // customer-concentration + MD&A excerpts from the filing
+}
+
+/** Plain, citable evidence block for the desk — demand-side facts sourced from the filing text. */
+export function demandBriefing(d: DemandProfile): string {
+  const parts: string[] = [];
+  if (d.customer_concentration) parts.push(`Customer concentration: ${d.customer_concentration}.`);
+  if (d.customers.length) parts.push(`Key customers: ${d.customers.map((c) => `${c.name}${c.share_pct != null ? ` (${c.share_pct}%)` : ""}${c.reliability !== "unknown" ? ` [${c.reliability}]` : ""}`).join("; ")}.`);
+  if (d.segments.length) parts.push(`Segments: ${d.segments.map((s) => `${s.name}${s.revenue_share_pct != null ? ` ${s.revenue_share_pct}%` : ""}${s.trend ? ` (${s.trend})` : ""}`).join("; ")}.`);
+  if (d.geographic.length) parts.push(`Geography: ${d.geographic.map((g) => `${g.region}${g.revenue_share_pct != null ? ` ${g.revenue_share_pct}%` : ""}`).join("; ")}.`);
+  if (d.demand_signals) parts.push(`Demand signals: ${d.demand_signals}`);
+  if (d.supply_constraints) parts.push(`Supply constraints: ${d.supply_constraints}`);
+  return parts.length ? `Demand & supply (from the filing — ground truth):\n${parts.map((p) => `- ${p}`).join("\n")}` : "";
+}
+
 export interface FundamentalsAnalyst {
   frameForward(input: ForwardFrameInput): Promise<ForwardFrame>;
   draftThesis(input: ThesisDraftInput): Promise<ThesisDraft>;
   extractLinks(input: LinkExtractInput): Promise<LinkExtractResult>;
   extractDrivers(input: DriverExtractInput): Promise<DriversResult>;
+  /** Optional so existing fakes keep working; coverage skips the demand step when absent. */
+  extractDemand?(input: DemandExtractInput): Promise<DemandProfile>;
 }
 
 function headline(model: FinancialModel): Record<string, number> {
@@ -195,5 +233,25 @@ Only extract drivers grounded in the text — do NOT invent.${focusLine(input.re
 MD&A excerpt:
 ${input.mda_text}`;
     return completeJSON({ prompt, schema: DriversResult, model: "claude-sonnet-4-6", purpose: "fundamentals.drivers", maxTokens: 1600 });
+  }
+
+  async extractDemand(input: DemandExtractInput): Promise<DemandProfile> {
+    const prompt = `Read this ${input.filing.form} excerpt for ${input.company.legal_name} (${input.company.ticker}) and extract the DEMAND-SIDE picture — the supply/demand levers a buy-side analyst needs.
+
+Extract ONLY what the text states or clearly supports; do NOT invent names, customers, or figures. Leave fields empty when the text is silent.
+- customers: named customers and, if disclosed, their % of revenue and what they buy. Judge reliability from the text: "reliable" (diversified/contracted/sticky), "cyclical" (tied to a capex cycle, e.g. hyperscaler AI spend), "at_risk" (single-customer dependency, losing a program, concentration risk), or "unknown".
+- customer_concentration: the disclosed concentration (e.g. "one customer >10% of revenue", "top 5 ≈ X%") or "none disclosed".
+- segments / geographic: revenue mix by segment and region with % where given, plus the trend.
+- demand_signals: orders, backlog, bookings, sell-through, or contracted/sold-out commentary.
+- supply_constraints: capacity, lead-time, allocation, or utilization commentary.
+
+Return JSON:
+{"customers": [{"name": string, "share_pct": number|null, "relationship": string, "reliability": "reliable|cyclical|at_risk|unknown", "note": string}],
+ "customer_concentration": string, "segments": [{"name": string, "revenue_share_pct": number|null, "trend": string}],
+ "geographic": [{"region": string, "revenue_share_pct": number|null}], "demand_signals": string, "supply_constraints": string}
+
+Excerpt:
+${input.text}`;
+    return completeJSON({ prompt, schema: DemandProfile, model: "claude-sonnet-4-6", purpose: "fundamentals.demand", maxTokens: 2000 });
   }
 }
