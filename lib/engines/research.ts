@@ -54,7 +54,8 @@ export const ThesisSynthesis = z.object({
 export type ThesisSynthesis = z.infer<typeof ThesisSynthesis>;
 
 export const VerificationResult = z.object({
-  verdicts: z.array(z.object({ claim: z.string(), status: z.enum(["supported", "unverified", "contradicted"]), note: z.string() })).default([]),
+  // W4: a "supported" verdict must cite the specific figure/passage from the evidence that backs it.
+  verdicts: z.array(z.object({ claim: z.string(), status: z.enum(["supported", "unverified", "contradicted"]), note: z.string(), citation: z.string().default("") })).default([]),
   confidence: Confidence,
   missing_sources: z.array(z.string()).default([]),
   recommendation: z.enum(["auto", "review"]),
@@ -254,7 +255,7 @@ Return JSON:
 
   private verify(thesis: ThesisSynthesis, panel: ExpertContribution[], block: string): Promise<VerificationResult> {
     const claims = [...new Set([...thesis.claims_to_verify, ...panel.flatMap((p) => p.claims.map((c) => c.statement))])].slice(0, 12);
-    const prompt = `You are a skeptical fact-checker and devil's advocate. For EACH claim below, judge it ONLY against the evidence provided: "supported" (the evidence backs it), "unverified" (plausible but the evidence here doesn't establish it), or "contradicted" (the evidence cuts against it). Do not be generous — default to "unverified" when the evidence is silent. Then give an overall confidence (0-1) in the thesis, list what additional sources are MISSING to raise confidence, and recommend "auto" only if confidence is high AND nothing is contradicted, else "review".
+    const prompt = `You are a skeptical fact-checker and devil's advocate. For EACH claim below, judge it ONLY against the evidence provided: "supported" (the evidence backs it), "unverified" (plausible but the evidence here doesn't establish it), or "contradicted" (the evidence cuts against it). Do not be generous — default to "unverified" when the evidence is silent. A verdict may be "supported" ONLY if you can cite the specific figure, line, or passage from the evidence that backs it — put that exact citation in the "citation" field (e.g. "XBRL: gross margin 84.6%", "Demand & supply: NVIDIA take-or-pay", "customer capex +30%"). No citation → it is "unverified", not "supported". Then give an overall confidence (0-1), list what additional sources are MISSING to raise confidence, and recommend "auto" only if confidence is high AND nothing is contradicted, else "review".
 
 ${block}
 
@@ -264,7 +265,7 @@ Claims:
 ${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 
 Return JSON:
-{"verdicts": [{"claim": string, "status": "supported|unverified|contradicted", "note": string}],
+{"verdicts": [{"claim": string, "status": "supported|unverified|contradicted", "note": string, "citation": string}],
  "confidence": number, "missing_sources": [string], "recommendation": "auto|review"}`;
     return completeJSON({ prompt, schema: VerificationResult, model: this.cfg.verifyModel, purpose: "research.verify", maxTokens: 3000 });
   }

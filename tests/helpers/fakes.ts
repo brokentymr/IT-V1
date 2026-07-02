@@ -49,7 +49,7 @@ export function fakeResearchPanel(
           invalidation_triggers: ["Net margin < 22% for two quarters"], conviction: 4, claims_to_verify: ["revenue grew"],
         },
         verification: {
-          verdicts: [{ claim: "revenue grew", status: "supported", note: "XBRL confirms" }],
+          verdicts: [{ claim: "revenue grew", status: "supported", note: "XBRL confirms", citation: "XBRL: revenue YoY" }],
           confidence: opts.confidence ?? 0.82, missing_sources: ["earnings call transcript"], recommendation: opts.recommendation ?? "auto",
         },
       };

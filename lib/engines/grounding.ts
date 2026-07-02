@@ -11,9 +11,14 @@
 export type VerdictStatus = "supported" | "unverified" | "contradicted";
 
 export interface VerdictLike {
-  verdicts: Array<{ status: VerdictStatus }>;
+  verdicts: Array<{ status: VerdictStatus; citation?: string }>;
   recommendation: "auto" | "review";
   confidence: number;
+}
+
+export interface CoverageOpts {
+  /** W4: only count a "supported" verdict as grounded if it cites a specific source/passage. */
+  requireCitation?: boolean;
 }
 
 export interface ClaimLike {
@@ -30,12 +35,15 @@ export interface GroundingReport {
   coverage: number;
 }
 
-/** Grounded coverage of the load-bearing claims: how many the evidence actually backs. */
-export function groundedCoverage(v: VerdictLike): GroundingReport {
+/** Grounded coverage of the load-bearing claims: how many the evidence actually backs. With
+ *  requireCitation (W4), a "supported" verdict counts only if it cites a specific source/passage. */
+export function groundedCoverage(v: VerdictLike, opts: CoverageOpts = {}): GroundingReport {
   const total = v.verdicts.length;
-  const supported = v.verdicts.filter((x) => x.status === "supported").length;
-  const unverified = v.verdicts.filter((x) => x.status === "unverified").length;
+  const isSupported = (x: { status: VerdictStatus; citation?: string }) =>
+    x.status === "supported" && (!opts.requireCitation || !!x.citation?.trim());
+  const supported = v.verdicts.filter(isSupported).length;
   const contradicted = v.verdicts.filter((x) => x.status === "contradicted").length;
+  const unverified = total - supported - contradicted;
   return { total, supported, unverified, contradicted, coverage: total ? supported / total : 0 };
 }
 
@@ -52,8 +60,8 @@ export interface GroundingGate {
  * is downgraded to "review" — a confident-but-ungrounded thesis rests at the human checkpoint, never
  * auto-published. Never upgrades review → auto.
  */
-export function applyGroundingGate(v: VerdictLike, minCoverage: number): GroundingGate {
-  const report = groundedCoverage(v);
+export function applyGroundingGate(v: VerdictLike, minCoverage: number, opts: CoverageOpts = {}): GroundingGate {
+  const report = groundedCoverage(v, opts);
   if (v.recommendation !== "auto") {
     return { recommendation: "review", gated: false, reason: null, report };
   }

@@ -13,9 +13,9 @@ const cfg = (o: Partial<DeskConfig> = {}): DeskConfig => ({ ...DESK_CONFIG, ...o
 
 const verif = (confidence: number, opts: { contradicted?: number; unverified?: number; supported?: number; missing?: string[] } = {}): VerificationResult => ({
   verdicts: [
-    ...Array.from({ length: opts.contradicted ?? 0 }, (_, i) => ({ claim: `c${i}`, status: "contradicted" as const, note: "" })),
-    ...Array.from({ length: opts.unverified ?? 0 }, (_, i) => ({ claim: `u${i}`, status: "unverified" as const, note: "" })),
-    ...Array.from({ length: opts.supported ?? 0 }, (_, i) => ({ claim: `s${i}`, status: "supported" as const, note: "" })),
+    ...Array.from({ length: opts.contradicted ?? 0 }, (_, i) => ({ claim: `c${i}`, status: "contradicted" as const, note: "", citation: "" })),
+    ...Array.from({ length: opts.unverified ?? 0 }, (_, i) => ({ claim: `u${i}`, status: "unverified" as const, note: "", citation: "" })),
+    ...Array.from({ length: opts.supported ?? 0 }, (_, i) => ({ claim: `s${i}`, status: "supported" as const, note: "", citation: "cited" })),
   ],
   confidence,
   missing_sources: opts.missing ?? ["earnings call transcript"],

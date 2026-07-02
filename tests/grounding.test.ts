@@ -17,6 +17,26 @@ describe("groundedCoverage", () => {
   });
 });
 
+describe("groundedCoverage requireCitation (W4)", () => {
+  const withCites = {
+    verdicts: [
+      { status: "supported" as const, citation: "XBRL: GM 84.6%" },
+      { status: "supported" as const, citation: "" }, // supported but uncited
+      { status: "unverified" as const },
+    ],
+    recommendation: "auto" as const,
+    confidence: 0.7,
+  };
+  it("counts all supported without the flag", () => {
+    expect(groundedCoverage(withCites).supported).toBe(2);
+  });
+  it("counts only CITED supported with the flag (uncited → unverified)", () => {
+    const r = groundedCoverage(withCites, { requireCitation: true });
+    expect(r.supported).toBe(1);
+    expect(r.unverified).toBe(2);
+  });
+});
+
 describe("applyGroundingGate", () => {
   it("downgrades a confident-but-ungrounded thesis to review (the Micron failure)", () => {
     const g = applyGroundingGate(v(["supported", "supported", ...Array(11).fill("unverified") as Array<"unverified">], "auto"), 0.6);

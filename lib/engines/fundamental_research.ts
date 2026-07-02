@@ -406,7 +406,7 @@ export async function runCoveragePass(opts: {
   // Grounding gate (pipeline upgrade §2): a confident thesis carried mostly by ungrounded priors
   // (the Micron failure — only 2/13 claims backed by evidence) must not auto-publish. Downgrade to
   // review; the human checkpoint decides. Never upgrades review → auto.
-  const grounding = applyGroundingGate(research.verification, deskConfig.minGroundedCoverage);
+  const grounding = applyGroundingGate(research.verification, deskConfig.minGroundedCoverage, { requireCitation: true });
   if (grounding.gated) {
     research.verification.recommendation = "review";
     console.log(`[coverage] grounding gate held ${company.primary_ticker} for review: ${grounding.reason}`);
