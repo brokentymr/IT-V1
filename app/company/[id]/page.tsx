@@ -45,6 +45,7 @@ interface SnapContent {
   levers?: {
     roe?: { roe: number | null; net_margin: number | null; asset_turnover: number | null; equity_multiplier: number | null; driver?: string | null; read: string };
     balance_sheet?: { health: string; read: string; current_ratio: number | null; net_cash: number | null; interest_coverage: number | null; cash_conversion: number | null; free_cash_flow: number | null };
+    working_capital?: { dso: number | null; dio: number | null; dpo: number | null; ccc: number | null };
   };
   demand?: {
     customers?: Array<{ name: string; share_pct?: number | null; relationship?: string; reliability?: string; note?: string }>;
@@ -343,6 +344,12 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
                       {b.cash_conversion != null ? <span className="mono"><span className="faint">cash conv </span>{xx(b.cash_conversion)}</span> : null}
                       {b.free_cash_flow != null ? <span className="mono"><span className="faint">FCF </span>{bn(b.free_cash_flow)}</span> : null}
                     </div>
+                  </div>
+                ) : null}
+                {L.working_capital && L.working_capital.ccc != null ? (
+                  <div className="row" style={{ gap: ".6rem", flexWrap: "wrap", fontSize: ".9rem", borderTop: "1px solid var(--panel-2)", paddingTop: ".5rem", marginTop: ".5rem" }}>
+                    <span className="mono"><span className="faint">CCC </span>{L.working_capital.ccc.toFixed(0)}d</span>
+                    <span className="mono faint">DSO {L.working_capital.dso?.toFixed(0) ?? "—"}d · DIO {L.working_capital.dio?.toFixed(0) ?? "—"}d · DPO {L.working_capital.dpo?.toFixed(0) ?? "—"}d</span>
                   </div>
                 ) : null}
                 <p className="faint" style={{ fontSize: ".72rem", marginTop: ".4rem" }}>Computed from XBRL — citable to the filing.</p>

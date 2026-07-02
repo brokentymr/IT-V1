@@ -62,5 +62,9 @@ export const FUNDAMENTALS_CONFIG: FundamentalsConfig = {
     { key: "long_term_debt", label: "Long-term debt", unit: "USD", kind: "stock", tags: ["LongTermDebtNoncurrent", "LongTermDebt"] },
     { key: "capex", label: "Capital expenditure", unit: "USD", kind: "flow", tags: ["PaymentsToAcquirePropertyPlantAndEquipment"] },
     { key: "interest_expense", label: "Interest expense", unit: "USD", kind: "flow", tags: ["InterestExpense", "InterestExpenseNonoperating"] },
+    // Working-capital / cash-conversion cycle (grounding v2 W5): receivables, inventory, payables.
+    { key: "accounts_receivable", label: "Accounts receivable", unit: "USD", kind: "stock", tags: ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"] },
+    { key: "inventory", label: "Inventory", unit: "USD", kind: "stock", tags: ["InventoryNet"] },
+    { key: "accounts_payable", label: "Accounts payable", unit: "USD", kind: "stock", tags: ["AccountsPayableCurrent", "AccountsPayableTradeCurrent"] },
   ],
 };

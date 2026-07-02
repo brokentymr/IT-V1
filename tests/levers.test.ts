@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeROELevers, computeBalanceSheetHealth, computeLevers, leversBriefing, type ModelLike } from "../lib/financials/levers";
+import { computeROELevers, computeBalanceSheetHealth, computeWorkingCapital, computeLevers, leversBriefing, type ModelLike } from "../lib/financials/levers";
 
 // Micron Q3 FY2026 real figures (USD).
 const micron: ModelLike = {
@@ -72,6 +72,27 @@ describe("computeBalanceSheetHealth", () => {
     expect(b.cash_conversion).toBeCloseTo(1.618, 2);
     expect(b.free_cash_flow).toBeNull();
     expect(["strong", "adequate"]).toContain(b.health);
+  });
+});
+
+describe("computeWorkingCapital (cash-conversion cycle)", () => {
+  const wcModel: ModelLike = {
+    line_items: { revenue: { value: 1000 }, cost_of_revenue: { value: 600 }, accounts_receivable: { value: 500 }, inventory: { value: 300 }, accounts_payable: { value: 200 } },
+  };
+  it("computes DSO/DIO/DPO/CCC for a quarter (91 days)", () => {
+    const w = computeWorkingCapital(wcModel, 91);
+    expect(w.dso).toBeCloseTo(45.5, 1); // 500/1000*91
+    expect(w.dio).toBeCloseTo(45.5, 1); // 300/600*91
+    expect(w.dpo).toBeCloseTo(30.33, 1); // 200/600*91
+    expect(w.ccc).toBeCloseTo(45.5 + 45.5 - 30.33, 0);
+  });
+  it("scales with the period length (annual = 365)", () => {
+    expect(computeWorkingCapital(wcModel, 365).dso).toBeCloseTo(182.5, 1);
+  });
+  it("degrades to null without the balance-sheet inputs", () => {
+    const w = computeWorkingCapital({ line_items: { revenue: { value: 1000 } } }, 91);
+    expect(w.dso).toBeNull();
+    expect(w.ccc).toBeNull();
   });
 });
 

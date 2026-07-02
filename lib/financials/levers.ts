@@ -126,16 +126,48 @@ function fmtB(n: number): string {
   return Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`;
 }
 
+export interface WorkingCapital {
+  days_in_period: number;
+  dso: number | null; // days sales outstanding
+  dio: number | null; // days inventory outstanding — rising DIO is an early demand-softening signal
+  dpo: number | null; // days payable outstanding
+  ccc: number | null; // cash conversion cycle = DSO + DIO - DPO
+  read: string;
+}
+
+/** Cash-conversion cycle from the balance sheet + income statement. daysInPeriod: 91 for a quarter,
+ *  365 for a full year (the caller knows the form type). Missing inputs → null, never fabricated. */
+export function computeWorkingCapital(m: ModelLike, daysInPeriod = 91): WorkingCapital {
+  const rev = val(m, "revenue");
+  const cogs = val(m, "cost_of_revenue");
+  const ar = val(m, "accounts_receivable");
+  const inv = val(m, "inventory");
+  const ap = val(m, "accounts_payable");
+
+  const dso = ar != null && rev ? (ar / rev) * daysInPeriod : null;
+  const dio = inv != null && cogs ? (inv / cogs) * daysInPeriod : null;
+  const dpo = ap != null && cogs ? (ap / cogs) * daysInPeriod : null;
+  const ccc = dso != null && dio != null && dpo != null ? dso + dio - dpo : null;
+
+  const d = (n: number | null) => (n == null ? "—" : `${n.toFixed(0)}d`);
+  const read = ccc != null
+    ? `Cash-conversion cycle ${ccc.toFixed(0)} days (DSO ${d(dso)} + DIO ${d(dio)} − DPO ${d(dpo)}).`
+    : `Partial working-capital data: DSO ${d(dso)}, DIO ${d(dio)}, DPO ${d(dpo)}.`;
+  return { days_in_period: daysInPeriod, dso, dio, dpo, ccc, read };
+}
+
 export interface Levers {
   roe: ROELevers;
   balance_sheet: BalanceSheetHealth;
+  working_capital: WorkingCapital;
 }
 
-export function computeLevers(m: ModelLike): Levers {
-  return { roe: computeROELevers(m), balance_sheet: computeBalanceSheetHealth(m) };
+export function computeLevers(m: ModelLike, daysInPeriod = 91): Levers {
+  return { roe: computeROELevers(m), balance_sheet: computeBalanceSheetHealth(m), working_capital: computeWorkingCapital(m, daysInPeriod) };
 }
 
 /** Evidence block for the desk — labeled ground truth (computed from the filing's XBRL). */
 export function leversBriefing(l: Levers): string {
-  return `Financial levers (computed from XBRL — ground truth, citable to the filing):\n- ROE levers: ${l.roe.read}\n- ${l.balance_sheet.read}`;
+  const wc = l.working_capital.dso != null || l.working_capital.dio != null ? `\n- Working capital: ${l.working_capital.read}` : "";
+  return `Financial levers (computed from XBRL — ground truth, citable to the filing):\n- ROE levers: ${l.roe.read}\n- ${l.balance_sheet.read}${wc}`;
 }

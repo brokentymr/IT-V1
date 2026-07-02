@@ -316,7 +316,7 @@ export async function runCoveragePass(opts: {
 
   // Financial levers (ROE/DuPont + balance-sheet health) computed from the XBRL — ground-truth,
   // citable to the filing. Fed to the desk so its claims about returns and the balance sheet are grounded.
-  const levers = computeLevers(model);
+  const levers = computeLevers(model, /^10-K/i.test(opts.formType ?? "") ? 365 : 91);
 
   const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
   const demandBrief = demand ? demandBriefing(demand) : "";
