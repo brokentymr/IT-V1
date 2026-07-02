@@ -1,18 +1,23 @@
 // Run Engine 2 (Fundamental Research) manually for a ticker.
 // Usage:
 //   npm run fundamentals -- AAPL --forward [--force]         (stage the forward note)
-//   npm run fundamentals -- AAPL --coverage [--accession N] [--form 10-Q]
+//   npm run fundamentals -- AAPL --coverage [--accession N] [--form 10-Q] [--no-commit]
 // Coverage with no --accession picks the company's latest covered filing from EDGAR.
+// Coverage mirrors the production handler (retrieval planner + external evidence + positioning +
+// auto-commit); --no-commit runs the full research without publishing (dry regen).
 import { loadEnv } from "../lib/env";
 import { query, closePool } from "../lib/db/pool";
 import { stopBoss } from "../lib/queue/boss";
 import { SecAdapter, liveJsonFetcher } from "../lib/sources/sec";
 import { NasdaqEarningsAdapter } from "../lib/sources/earnings";
-import { PerplexityFinance } from "../lib/sources/perplexity";
+import { PerplexityFinance, PerplexityClient } from "../lib/sources/perplexity";
 import { ClaudeFundamentalsAnalyst } from "../lib/engines/fundamentals_analyst";
 import { ClaudeNewsAnalyzer } from "../lib/engines/analyzer";
 import { runForwardPass, runCoveragePass } from "../lib/engines/fundamental_research";
 import { FUNDAMENTALS_CONFIG } from "../lib/config/fundamentals";
+import { DESK_CONFIG } from "../lib/config/desk";
+import { autoCommit as runAutoCommit } from "../lib/engines/autocommit";
+import { ClaudePositioningDesk } from "../lib/engines/positioning";
 import { llmSpendThisMonth } from "../lib/llm/client";
 
 loadEnv();
@@ -53,9 +58,17 @@ try {
       accession = latest.accession; form = latest.form; filingUrl = latest.url;
       console.error(`[fundamentals] latest filing: ${form} ${accession}`);
     }
+    // Mirror the production COVERAGE_PASS handler (lib/jobs/coverage.ts): the retrieval planner, W2/W7
+    // external evidence, and positioning stance all require `perplexity`/`deskConfig`/`positioningDesk`,
+    // and auto-commit publishes + enqueues content. Without these a manual regen is a degraded run that
+    // can't clear the grounding bar. `--no-commit` researches without publishing (dry regen).
     out = await runCoveragePass({
       companyId: company.id, accession, formType: form, filingUrl,
       analyst, newsAnalyzer: new ClaudeNewsAnalyzer(), finance, sec, trigger: "manual",
+      perplexity: new PerplexityClient(),
+      deskConfig: DESK_CONFIG,
+      positioningDesk: new ClaudePositioningDesk(),
+      autoCommit: flag("no-commit") ? undefined : (input) => runAutoCommit(input),
     });
   }
 
