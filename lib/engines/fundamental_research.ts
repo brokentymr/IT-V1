@@ -265,11 +265,27 @@ export async function runCoveragePass(opts: {
 
   // 3. Advisory market context (Perplexity/Fiscal.ai) + thesis narration over the figures.
   const mc = opts.finance ? await fetchMarketContext(opts.finance, company.primary_ticker) : null;
-  // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment).
+  // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment). Resilient to a
+  // missing filingUrl: the feeders (filing webhook / EDGAR poll) sometimes drop the primary-document
+  // URL, and without it the entire qualitative half — MD&A drivers (#3c), the forward scenario (#4),
+  // demand (below), hypotheses — silently no-ops while the XBRL half still commits at high grounding,
+  // publishing a driverless snapshot as if complete. When the URL is absent, resolve it from the
+  // accession before fetching.
+  let filingUrl = opts.filingUrl;
+  if (!filingUrl) {
+    const recent = await sec.recentFilings(company.cik, { forms: config.triggerForms }).catch(() => null);
+    filingUrl = recent?.data?.find((f) => f.accession === opts.accession)?.url ?? null;
+  }
   let html: string | null = null;
-  if (opts.filingUrl) {
-    const doc = await sec.fetchFilingDocument(opts.filingUrl).catch(() => null);
+  if (filingUrl) {
+    const doc = await sec.fetchFilingDocument(filingUrl).catch(() => null);
     html = doc?.ok ? doc.data : null;
+  }
+  if (!html) {
+    console.warn(
+      `[coverage] no filing document for ${company.primary_ticker} ${opts.accession} (filingUrl=${filingUrl ?? "unresolved"}); ` +
+        `running quant-only — MD&A drivers, forward scenario, demand, and hypotheses will be absent`,
+    );
   }
 
   // 3c. MD&A drivers (#3) → Monte Carlo next-period scenario (#4). Both best-effort.
@@ -467,7 +483,7 @@ export async function runCoveragePass(opts: {
     const src = await client.query<{ id: string }>(
       `INSERT INTO sources (company_id, tier, kind, origin, url, title, retrieved_at, metadata)
        VALUES ($1, 1, 'filing', 'SEC EDGAR', $2, $3, now(), $4) RETURNING id`,
-      [company.id, opts.filingUrl ?? null, `${opts.formType ?? "Filing"} ${opts.accession}`, { accession: opts.accession }],
+      [company.id, filingUrl ?? null, `${opts.formType ?? "Filing"} ${opts.accession}`, { accession: opts.accession }],
     );
     const sourceId = src.rows[0].id;
 
@@ -537,7 +553,7 @@ export async function runCoveragePass(opts: {
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
       thesis,
-      events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: opts.filingUrl ?? null }] },
+      events: { filings: [{ accession: opts.accession, form: opts.formType ?? null, url: filingUrl ?? null }] },
     };
 
     await client.query(
