@@ -36,6 +36,8 @@ import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
+import { computeTrends } from "../financials/trends";
+import { checkConsistency, type ComputedFacts } from "./consistency";
 import { positioningComplete, type PositioningDesk, type PositioningDecision } from "./positioning";
 
 interface CompanyRow {
@@ -318,9 +320,13 @@ export async function runCoveragePass(opts: {
   // citable to the filing. Fed to the desk so its claims about returns and the balance sheet are grounded.
   const levers = computeLevers(model, /^10-K/i.test(opts.formType ?? "") ? 365 : 91);
 
+  // W3: multi-year trend context from the filing history — grounds baseline/cyclicality claims.
+  const trends = computeTrends(metricYoYGrowths(facts.data, "revenue", config), netMarginLevels(facts.data, config), model.ratios.net_margin ?? null);
+
   const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
   const demandBrief = demand ? demandBriefing(demand) : "";
-  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}${demandBrief ? `\n\n${demandBrief}` : ""}`;
+  const trendBrief = trends.read ? `\n\n${trends.read}` : "";
+  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}${demandBrief ? `\n\n${demandBrief}` : ""}${trendBrief}`;
   const evidence = coherence.agree ? withLevers : `${withLevers}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
@@ -406,6 +412,19 @@ export async function runCoveragePass(opts: {
     console.log(`[coverage] grounding gate held ${company.primary_ticker} for review: ${grounding.reason}`);
   }
   const synth = research.thesis;
+
+  // W6: consistency — do the desk's claims contradict the computed figures? Conflicts are held for review.
+  const cfacts: ComputedFacts = {
+    fcf_negative: levers.balance_sheet.free_cash_flow != null && levers.balance_sheet.free_cash_flow < 0,
+    net_debt: levers.balance_sheet.net_cash != null && levers.balance_sheet.net_cash < 0,
+    revenue_declining: (model.line_items.revenue?.yoy?.change_pct ?? 0) < 0,
+    margin_declining:
+      model.line_items.gross_profit?.yoy != null && model.line_items.revenue?.yoy != null &&
+      model.line_items.gross_profit.yoy.change_pct < model.line_items.revenue.yoy.change_pct,
+  };
+  const consistencyText = `${synth.one_liner} ${synth.long_form} ${research.panel.flatMap((p) => p.claims.map((c) => c.statement)).join(" ")}`;
+  const consistency = checkConsistency(cfacts, consistencyText);
+  if (consistency.length) console.warn(`[coverage] ${company.primary_ticker} consistency conflicts: ${consistency.map((c) => c.fact).join(", ")}`);
 
   // Positioning / decision (pipeline upgrade — Doc 2): convert the adjudicated research into an actual
   // CALL — stance, variant view, target range, dated catalysts, sizing. Injectable; skipped when not
@@ -500,6 +519,8 @@ export async function runCoveragePass(opts: {
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
       levers, // ROE/DuPont + balance-sheet health, computed from XBRL (grounded to the filing)
+      trends, // W3: multi-year trend/cyclicality context from the filing series
+      ...(consistency.length ? { consistency } : {}), // W6: claims that conflict with the computed figures
       ...(demand ? { demand } : {}), // demand-side levers extracted from the primary filing text
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
@@ -569,7 +590,8 @@ export async function runCoveragePass(opts: {
   // Publish gates on auto-commit: an ungrounded thesis (§2) AND a description-only decision (Doc 2 §6 —
   // no variant view or no catalysts) are both held for the human checkpoint, never auto-published.
   const positioningOk = positioning ? positioningComplete(positioning).complete : true;
-  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk;
+  // A claim that contradicts the computed figures (W6) is a hard hold, like a standing contradiction.
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;
