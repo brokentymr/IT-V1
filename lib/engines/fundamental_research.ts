@@ -34,6 +34,7 @@ import { loadOpenAreas, applyResolutions, type OpenArea } from "./areas_of_inter
 import { detectSurprises, surpriseBriefing, type Observation } from "./surprise";
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
+import { fetchTranscript, fetchMarketData, externalBlock } from "./external_evidence";
 import { reconcileScenario } from "../financials/reconcile";
 import { computeLevers, leversBriefing } from "../financials/levers";
 import { computeTrends } from "../financials/trends";
@@ -387,6 +388,17 @@ export async function runCoveragePass(opts: {
     } catch (e) {
       console.warn(`[coverage] retrieval planner failed: ${(e as Error).message}`);
     }
+  }
+
+  // W2 + W7: earnings-call transcript highlights + third-party market/pricing data (Perplexity-sourced,
+  // cited). Sourced passages the verifier can cite (W4), grounding management-commentary/pricing/share
+  // claims the filing alone doesn't establish. Best-effort; skipped without Perplexity.
+  if (opts.perplexity) {
+    const ext = externalBlock([
+      await fetchTranscript(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker }),
+      await fetchMarketData(opts.perplexity, { legal_name: company.legal_name, ticker: company.primary_ticker, gics_sector: company.gics_sector }),
+    ]);
+    if (ext) evidenceForDesk = `${evidenceForDesk}\n\n${ext}`;
   }
 
   // Per-asset deepen budget: stop escalating once THIS run has spent deepenBudgetUsd (measured as the
