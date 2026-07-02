@@ -233,7 +233,7 @@ Do not present a prior as if it were grounded. JSON:
     // 3000, not 1800: lens JSON (summary + up to 5 claims each with statement/basis/grounded/confidence
     // + key_points + risks) was truncating at the ceiling, so the JSON failed to parse and the whole
     // lens was silently dropped — non-deterministically thinning the panel (4 lenses → A, 2 → F).
-    return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 3000 });
+    return completeJSON({ prompt, schema: ExpertContribution, model: tier, purpose: `research.lens.${lens}`, maxTokens: 4000 });
   }
 
   private synthesize(panel: ExpertContribution[], block: string, focus?: string[]): Promise<ThesisSynthesis> {
@@ -261,7 +261,9 @@ Return JSON:
  "risks": [{"id": string, "title": string, "mechanism": string, "quantified_impact": string|null, "severity": "low|medium|high", "linked_trigger_id": string|null}],
  "triggers": [{"id": string, "condition": string, "disclosure": string, "source_ref": null}],
  "conviction": int 1-5, "claims_to_verify": [string]}`;
-    return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 3000 });
+    // maxTokens raised (was 3000): control P10 added the typed risks[] + triggers[] arrays to this
+    // response on top of the legacy fields, and 3000 truncated the JSON mid-array (parse failure).
+    return completeJSON({ prompt, schema: ThesisSynthesis, model: this.cfg.synthModel, purpose: "research.synthesis", maxTokens: 6000 });
   }
 
   private verify(thesis: ThesisSynthesis, panel: ExpertContribution[], block: string): Promise<VerificationResult> {
@@ -278,6 +280,8 @@ ${claims.map((c, i) => `${i + 1}. ${c}`).join("\n")}
 Return JSON:
 {"verdicts": [{"claim": string, "status": "supported|unverified|contradicted", "note": string, "citation": string}],
  "confidence": number, "missing_sources": [string], "recommendation": "auto|review"}`;
-    return completeJSON({ prompt, schema: VerificationResult, model: this.cfg.verifyModel, purpose: "research.verify", maxTokens: 3000 });
+    // maxTokens raised (was 3000): a richer, more grounded thesis yields more verdicts, truncating the
+    // verdicts array at 3000 (parse failure). Verify must have room to rule on every load-bearing claim.
+    return completeJSON({ prompt, schema: VerificationResult, model: this.cfg.verifyModel, purpose: "research.verify", maxTokens: 6000 });
   }
 }
