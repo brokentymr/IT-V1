@@ -56,5 +56,11 @@ export const FUNDAMENTALS_CONFIG: FundamentalsConfig = {
       tags: ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"] },
     { key: "cash", label: "Cash & equivalents", unit: "USD", kind: "stock",
       tags: ["CashAndCashEquivalentsAtCarryingValue"] },
+    // Balance-sheet health + ROE levers (pipeline upgrade): liquidity, leverage, coverage, free cash flow.
+    { key: "current_assets", label: "Current assets", unit: "USD", kind: "stock", tags: ["AssetsCurrent"] },
+    { key: "current_liabilities", label: "Current liabilities", unit: "USD", kind: "stock", tags: ["LiabilitiesCurrent"] },
+    { key: "long_term_debt", label: "Long-term debt", unit: "USD", kind: "stock", tags: ["LongTermDebtNoncurrent", "LongTermDebt"] },
+    { key: "capex", label: "Capital expenditure", unit: "USD", kind: "flow", tags: ["PaymentsToAcquirePropertyPlantAndEquipment"] },
+    { key: "interest_expense", label: "Interest expense", unit: "USD", kind: "flow", tags: ["InterestExpense", "InterestExpenseNonoperating"] },
   ],
 };

@@ -42,6 +42,10 @@ interface SnapContent {
     invalidation_triggers?: string[];
   };
   key_debates?: Array<{ question: string; bull?: string; bear?: string; lean?: string }>;
+  levers?: {
+    roe?: { roe: number | null; net_margin: number | null; asset_turnover: number | null; equity_multiplier: number | null; driver?: string | null; read: string };
+    balance_sheet?: { health: string; read: string; current_ratio: number | null; net_cash: number | null; interest_coverage: number | null; cash_conversion: number | null; free_cash_flow: number | null };
+  };
 }
 interface Diff { metrics?: Array<{ key: string; label: string; prior: number | null; current: number; change_pct: number | null; direction: string }> }
 
@@ -297,6 +301,46 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
               ) : null}
             </div>
           ) : null}
+
+          {/* Return levers & balance-sheet health (computed from XBRL — citable to the filing). */}
+          {content.levers ? (() => {
+            const L = content.levers!;
+            const r = L.roe; const b = L.balance_sheet;
+            const px = (n?: number | null) => (n == null ? "—" : `${(n * 100).toFixed(1)}%`);
+            const xx = (n?: number | null) => (n == null ? "—" : `${n.toFixed(2)}x`);
+            const bn = (n?: number | null) => (n == null ? "—" : Math.abs(n) >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : `$${(n / 1e6).toFixed(0)}M`);
+            return (
+              <div className="panel">
+                <h2 style={{ marginTop: 0 }}>Return levers &amp; balance sheet</h2>
+                {r ? (
+                  <div style={{ marginBottom: ".5rem" }}>
+                    <div className="row" style={{ gap: ".6rem", flexWrap: "wrap", fontSize: ".9rem" }}>
+                      <span className="mono"><span className="faint">ROE </span>{px(r.roe)}</span>
+                      <span className="faint">=</span>
+                      <span className="mono">margin {px(r.net_margin)}</span><span className="faint">×</span>
+                      <span className="mono">turnover {xx(r.asset_turnover)}</span><span className="faint">×</span>
+                      <span className="mono">leverage {xx(r.equity_multiplier)}</span>
+                      {r.driver ? <span className="tag accent">{r.driver}-driven</span> : null}
+                    </div>
+                    <p className="muted" style={{ fontSize: ".84rem", marginTop: ".3rem" }}>{r.read}</p>
+                  </div>
+                ) : null}
+                {b ? (
+                  <div style={{ borderTop: "1px solid var(--panel-2)", paddingTop: ".5rem" }}>
+                    <div className="row" style={{ gap: ".6rem", flexWrap: "wrap", fontSize: ".9rem" }}>
+                      <span className={`tag ${b.health === "strong" ? "good" : b.health === "stretched" ? "bad" : ""}`}>{b.health}</span>
+                      {b.current_ratio != null ? <span className="mono"><span className="faint">current </span>{xx(b.current_ratio)}</span> : null}
+                      {b.net_cash != null ? <span className="mono">{b.net_cash >= 0 ? "net cash " : "net debt "}{bn(Math.abs(b.net_cash))}</span> : null}
+                      {b.interest_coverage != null ? <span className="mono"><span className="faint">int. cov </span>{xx(b.interest_coverage)}</span> : null}
+                      {b.cash_conversion != null ? <span className="mono"><span className="faint">cash conv </span>{xx(b.cash_conversion)}</span> : null}
+                      {b.free_cash_flow != null ? <span className="mono"><span className="faint">FCF </span>{bn(b.free_cash_flow)}</span> : null}
+                    </div>
+                  </div>
+                ) : null}
+                <p className="faint" style={{ fontSize: ".72rem", marginTop: ".4rem" }}>Computed from XBRL — citable to the filing.</p>
+              </div>
+            );
+          })() : null}
 
           {/* Profile (private / pre-IPO names) */}
           {content.profile ? (

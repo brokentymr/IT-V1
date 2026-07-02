@@ -35,6 +35,7 @@ import { detectSurprises, surpriseBriefing, type Observation } from "./surprise"
 import { applyGroundingGate } from "./grounding";
 import { ClaudeRetrievalPlanner } from "./retrieval_planner";
 import { reconcileScenario } from "../financials/reconcile";
+import { computeLevers, leversBriefing } from "../financials/levers";
 import { positioningComplete, type PositioningDesk, type PositioningDecision } from "./positioning";
 
 interface CompanyRow {
@@ -297,8 +298,13 @@ export async function runCoveragePass(opts: {
   // presented as one model.
   const coherence = reconcileScenario(drivers, scenario?.bands?.revenue_growth ?? null);
 
+  // Financial levers (ROE/DuPont + balance-sheet health) computed from the XBRL — ground-truth,
+  // citable to the filing. Fed to the desk so its claims about returns and the balance sheet are grounded.
+  const levers = computeLevers(model);
+
   const evidenceBase = buildEvidence(model, diff, drivers, scenario, mc, openAreas, `${opts.formType ?? "Filing"} ${opts.accession} (period ${model.fiscal_period ?? "?"})`, briefing);
-  const evidence = coherence.agree ? evidenceBase : `${evidenceBase}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
+  const withLevers = `${evidenceBase}\n\n${leversBriefing(levers)}`;
+  const evidence = coherence.agree ? withLevers : `${withLevers}\n\nMODEL COHERENCE WARNING: ${coherence.note}`;
 
   // 3e. The analyst desk: 4 expert lenses → senior synthesis → adversarial verification, wrapped in
   // the Workstream-C deepening loop. When verification is short of the bar, `enrich` gap-fills on the
@@ -476,6 +482,7 @@ export async function runCoveragePass(opts: {
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
       ...(surprises.length ? { surprises } : {}),
       ...(synth.key_debates?.length ? { key_debates: synth.key_debates } : {}),
+      levers, // ROE/DuPont + balance-sheet health, computed from XBRL (grounded to the filing)
       ...(positioning ? { positioning } : {}),
       research: researchBlock,
       thesis,
