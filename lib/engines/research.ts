@@ -12,7 +12,7 @@ import { z } from "zod";
 import { Risk, InvalidationTrigger } from "../types";
 import { completeJSON, CostCeilingError } from "../llm/client";
 import { RESOLUTION_VERDICTS } from "./areas_of_interest";
-import { deepenToConfidence, type DeepenSteps, type DeepeningTrace } from "./deepen";
+import { deepenToConfidence, publishableBySubstance, type DeepenSteps, type DeepeningTrace } from "./deepen";
 import { ClaudeDeskManager } from "./desk_manager";
 import { claimsDigest, divergenceNote } from "./adjudication";
 import { DESK_CONFIG, type DeskConfig } from "../config/desk";
@@ -61,7 +61,9 @@ export type ThesisSynthesis = z.infer<typeof ThesisSynthesis>;
 
 export const VerificationResult = z.object({
   // W4: a "supported" verdict must cite the specific figure/passage from the evidence that backs it.
-  verdicts: z.array(z.object({ claim: z.string(), status: z.enum(["supported", "unverified", "contradicted"]), note: z.string(), citation: z.string().default("") })).default([]),
+  // `unverifiable` (set by the coverage-closer, never the model) = tried against filing + external and
+  // unsourceable → dropped from the grounded-coverage denominator and surfaced as an explicit gap.
+  verdicts: z.array(z.object({ claim: z.string(), status: z.enum(["supported", "unverified", "contradicted"]), note: z.string(), citation: z.string().default(""), unverifiable: z.boolean().optional() })).default([]),
   confidence: Confidence,
   missing_sources: z.array(z.string()).default([]),
   recommendation: z.enum(["auto", "review"]),
@@ -72,6 +74,11 @@ export type VerificationResult = z.infer<typeof VerificationResult>;
  *  Absent in tests/onboarding, in which case the deepening loop re-lenses/bumps tier without new evidence. */
 export type ResearchEnrich = (input: { missing: string[]; unverified: string[] }) => Promise<{ appended: string; sources: string[] } | null>;
 
+/** Per-claim citation binding for the coverage-closer, supplied by the caller (coverage wires the filing
+ *  text + Perplexity). Given the unverified load-bearing claims, returns each bound to a citation or
+ *  flagged unverifiable. Absent in tests → the coverage-closer no-ops. */
+export type ResearchBind = (claims: string[]) => Promise<Array<{ claim: string; status: "supported" | "unverifiable"; citation: string; source: string }>>;
+
 export interface ResearchContext {
   company: { legal_name: string; ticker: string | null; gics_sector: string | null; listing: string };
   evidence: string; // assembled by the caller: figures, drivers, scenario, consensus, profile, news
@@ -79,6 +86,7 @@ export interface ResearchContext {
   forward_expectations?: string | null;
   research_focus?: string[];
   enrich?: ResearchEnrich;
+  bind?: ResearchBind;
   /** Per-asset budget gate checked between deepening rounds (coverage wires it to the LLM ledger). */
   withinBudget?: () => Promise<boolean>;
 }
@@ -168,7 +176,71 @@ export class ClaudeResearchPanel implements ResearchPanel {
       company: { legal_name: ctx.company.legal_name, ticker: ctx.company.ticker },
       evidence: contextBlock(ctx), focus: ctx.research_focus,
     });
+
+    // Coverage-closer (grounding as a first-class target): the confidence loop above optimizes CONFIDENCE;
+    // it can settle with grounded coverage still under the bar because most load-bearing claims lack an
+    // explicit citation. Here we agentically BIND each unverified claim to a specific source — filing
+    // first, then a targeted external query — until coverage clears or every claim has been tried. This
+    // is what makes grounding reliable rather than a post-hoc gate the loop never aimed at.
+    if (this.cfg.coverageBindingEnabled && ctx.bind) {
+      await this.closeCoverage(verification, trace, ctx.bind);
+    }
     return { panel, thesis, verification, deepening: trace };
+  }
+
+  /** Drive grounded coverage up to the bar by binding each unverified load-bearing claim to a citation.
+   *  Mutates `verification.verdicts` in place: a bound claim becomes supported+citation; a claim tried and
+   *  unsourceable is flagged `unverifiable` (dropped from the coverage denominator, surfaced as a gap).
+   *  Loops up to `coverageMaxBindRounds`, stopping early once coverage clears or a round binds nothing new.
+   *  Then re-decides publishability on the now-grounded artifact: a thesis with NO contradictions whose
+   *  supported claims clear the coverage bar and outnumber the unverified is publishable by substance —
+   *  so grounding work can rescue a hold that was only ever a coverage/confidence-float shortfall. The hard
+   *  contradiction block is never relaxed, and a cleared artifact is never downgraded here. */
+  private async closeCoverage(verification: VerificationResult, trace: DeepeningTrace, bind: ResearchBind): Promise<void> {
+    const counted = () => verification.verdicts.filter((v) => !v.unverifiable);
+    const coverage = (): number => {
+      const c = counted();
+      const supported = c.filter((v) => v.status === "supported" && v.citation.trim()).length;
+      return c.length ? supported / c.length : 1;
+    };
+    for (let round = 0; round < this.cfg.coverageMaxBindRounds; round++) {
+      if (coverage() >= this.cfg.minGroundedCoverage) break;
+      const open = verification.verdicts.filter((v) => v.status === "unverified" && !v.unverifiable);
+      if (!open.length) break;
+      let results: Awaited<ReturnType<ResearchBind>>;
+      try {
+        results = await bind(open.map((v) => v.claim));
+      } catch (e) {
+        console.warn(`[research] coverage-closer bind failed: ${(e as Error).message}`);
+        break;
+      }
+      const byClaim = new Map(results.map((r) => [r.claim, r]));
+      let boundNew = 0;
+      for (const v of open) {
+        const r = byClaim.get(v.claim);
+        if (!r) continue;
+        if (r.status === "supported" && r.citation.trim()) {
+          v.status = "supported"; v.citation = r.citation; v.note = v.note || "bound by coverage-closer"; boundNew++;
+        } else {
+          v.unverifiable = true; v.note = `${v.note} [unverifiable: ${r.source}]`.trim();
+        }
+      }
+      const total = counted().length;
+      const supported = counted().filter((v) => v.status === "supported" && v.citation.trim()).length;
+      console.log(`[research] coverage-closer round ${round}: bound ${boundNew}, coverage ${(coverage() * 100).toFixed(0)}% (${supported}/${total})`);
+      if (boundNew === 0) break; // nothing more this source can bind — remaining opens are now unverifiable
+    }
+
+    // Re-decide on the grounded artifact. Only ever UPGRADE review → auto (binding can't make things worse),
+    // and only when the artifact is genuinely publishable by substance AND clears the coverage bar.
+    if (!trace.cleared
+        && coverage() >= this.cfg.minGroundedCoverage
+        && publishableBySubstance(verification, this.cfg)) {
+      trace.cleared = true;
+      trace.stopped_reason = "cleared";
+      verification.recommendation = "auto";
+      console.log(`[research] coverage-closer: grounded artifact now clears (coverage ${(coverage() * 100).toFixed(0)}%, no contradictions) — recommend auto`);
+    }
   }
 
   /** The parallel expert lenses at a given model tier. A CostCeilingError fails the panel fast

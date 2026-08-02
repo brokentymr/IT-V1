@@ -27,7 +27,8 @@ import { DESK_CONFIG, type DeskConfig } from "../config/desk";
 import { llmSpendThisMonth } from "../llm/client";
 import { Thesis, ForwardNote, type ForwardNote as ForwardNoteT, type Driver } from "../types";
 import { demandBriefing, type FundamentalsAnalyst, type DemandProfile, type NonGaapReconciliation } from "./fundamentals_analyst";
-import { ClaudeResearchPanel, type ResearchPanel, type ResearchEnrich } from "./research";
+import { ClaudeResearchPanel, type ResearchPanel, type ResearchEnrich, type ResearchBind } from "./research";
+import { bindClaims } from "./claim_binding";
 import type { AutoCommitInput, AutoCommitResult } from "./autocommit";
 import type { NewsAnalyzer } from "./analyzer";
 import { propagateReadThrough } from "./read_through";
@@ -501,6 +502,29 @@ export async function runCoveragePass(opts: {
       }
     : undefined;
 
+  // Coverage-closer binder: bind each unverified load-bearing claim to a specific citation — the filing
+  // we already hold FIRST (free, where SSS/margins/units/guidance live), then a targeted external query
+  // with a source URL for what the filing can't cover. Uncoverable claims come back `unverifiable`.
+  const bind: ResearchBind | undefined = (html || opts.perplexity)
+    ? async (claims) => {
+        const externalAsk = opts.perplexity
+          ? async (claim: string) => {
+              const a = await opts.perplexity!.askText({
+                question: `For ${company.legal_name} (${company.primary_ticker}), give ONE specific, currently-sourced fact that establishes this claim, with the exact figure/date: "${claim}". Include a source URL.`,
+                maxTokens: 400, purpose: "research.bind.external",
+              }).catch(() => null);
+              return a?.ok && a.text ? { text: a.text, url: a.citations[0] ?? null } : null;
+            }
+          : null;
+        return bindClaims(claims, {
+          filing: html ? { text: html, label: `${opts.formType ?? "Filing"} ${opts.accession}` } : null,
+          externalAsk,
+          perClaimExternalQueries: deskConfig.perClaimExternalQueries,
+          minOverlap: deskConfig.bindMinKeywordOverlap,
+        });
+      }
+    : undefined;
+
   const researchFocus = [...new Set([...(company.coverage?.research_focus ?? []), ...(opts.focusOverride ?? [])])];
 
   // 3f. Retrieval planner (pipeline upgrade §2): fetch the specific facts a thesis needs BEFORE the
@@ -572,6 +596,7 @@ export async function runCoveragePass(opts: {
     forward_expectations: cf.forward?.expectations ?? null,
     research_focus: researchFocus.length ? researchFocus : undefined,
     enrich,
+    bind,
     withinBudget: async () => (await llmSpendThisMonth()) - spendAtStart < deskConfig.deepenBudgetUsd,
   });
 

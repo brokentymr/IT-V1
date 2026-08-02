@@ -46,6 +46,19 @@ export interface DeskConfig {
   minGroundedCoverage: number;
   /** When true, the retrieval planner fetches the facts a thesis needs BEFORE the desk runs. */
   retrievalPlannerEnabled: boolean;
+  /** Coverage-closer (grounding as a first-class deepen target). After the confidence loop settles, if
+   *  grounded coverage is still below the bar, agentically BIND each unverified load-bearing claim to a
+   *  specific citation — the filing we already hold first, then a targeted external query — looping until
+   *  coverage clears or every claim has been tried. A claim actively tried and unfindable is reclassified
+   *  `unverifiable` (dropped from the coverage denominator, surfaced as an explicit gap), so a name that
+   *  is well-grounded on real filings isn't sunk by one genuinely-private fact. */
+  coverageBindingEnabled: boolean;
+  /** Targeted external (Perplexity) queries allowed PER still-unbound claim after the filing pass. */
+  perClaimExternalQueries: number;
+  /** Max bind→re-verify rounds in the coverage-closer. */
+  coverageMaxBindRounds: number;
+  /** Min fraction of a claim's salient keywords a filing passage must contain to count as a citation. */
+  bindMinKeywordOverlap: number;
 }
 
 export const DESK_CONFIG: DeskConfig = {
@@ -68,4 +81,8 @@ export const DESK_CONFIG: DeskConfig = {
   managerModel: "claude-opus-4-8",
   minGroundedCoverage: 0.5,
   retrievalPlannerEnabled: true,
+  coverageBindingEnabled: true,
+  perClaimExternalQueries: 1,
+  coverageMaxBindRounds: 2,
+  bindMinKeywordOverlap: 0.5,
 };

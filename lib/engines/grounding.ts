@@ -11,7 +11,11 @@
 export type VerdictStatus = "supported" | "unverified" | "contradicted";
 
 export interface VerdictLike {
-  verdicts: Array<{ status: VerdictStatus; citation?: string }>;
+  // `unverifiable` = the coverage-closer actively tried to source this claim (filing + external) and
+  // could not. It is dropped from the coverage DENOMINATOR (not counted against grounding) and surfaced
+  // as an explicit gap — a name well-grounded on real filings must not be sunk by one genuinely-private
+  // fact. Only a claim that was tried-and-failed may carry this flag; a merely-`unverified` claim never does.
+  verdicts: Array<{ status: VerdictStatus; citation?: string; unverifiable?: boolean }>;
   recommendation: "auto" | "review";
   confidence: number;
 }
@@ -27,24 +31,28 @@ export interface ClaimLike {
 }
 
 export interface GroundingReport {
-  total: number;
+  total: number;         // load-bearing claims counted toward coverage (EXCLUDES unverifiable)
   supported: number;
   unverified: number;
   contradicted: number;
+  unverifiable: number;  // actively tried + unsourceable → dropped from the denominator, surfaced as a gap
   /** supported / total, in [0,1]. 0 when there are no verdicts to stand on. */
   coverage: number;
 }
 
 /** Grounded coverage of the load-bearing claims: how many the evidence actually backs. With
- *  requireCitation (W4), a "supported" verdict counts only if it cites a specific source/passage. */
+ *  requireCitation (W4), a "supported" verdict counts only if it cites a specific source/passage.
+ *  `unverifiable` claims (tried + unsourceable) are excluded from the denominator entirely. */
 export function groundedCoverage(v: VerdictLike, opts: CoverageOpts = {}): GroundingReport {
-  const total = v.verdicts.length;
+  const unverifiable = v.verdicts.filter((x) => x.unverifiable === true).length;
+  const counted = v.verdicts.filter((x) => x.unverifiable !== true);
+  const total = counted.length;
   const isSupported = (x: { status: VerdictStatus; citation?: string }) =>
     x.status === "supported" && (!opts.requireCitation || !!x.citation?.trim());
-  const supported = v.verdicts.filter(isSupported).length;
-  const contradicted = v.verdicts.filter((x) => x.status === "contradicted").length;
+  const supported = counted.filter(isSupported).length;
+  const contradicted = counted.filter((x) => x.status === "contradicted").length;
   const unverified = total - supported - contradicted;
-  return { total, supported, unverified, contradicted, coverage: total ? supported / total : 0 };
+  return { total, supported, unverified, contradicted, unverifiable, coverage: total ? supported / total : 0 };
 }
 
 export interface GroundingGate {
