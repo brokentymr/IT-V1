@@ -40,6 +40,46 @@ function extractJson(text: string): string {
   return start >= 0 && end > start ? s.slice(start, end + 1) : s;
 }
 
+/**
+ * Best-effort repair of a JSON object truncated mid-stream (the model hit max_tokens partway through an
+ * array/object). Cuts back to the last structural close that is OUTSIDE a string, drops a dangling
+ * separator, and appends the closers for any still-open containers — so a truncated array-of-objects
+ * yields the elements that DID complete rather than a total parse failure. Returns null when nothing is
+ * salvageable. Used only on the failure path (after a normal parse throws), so it never alters the
+ * happy path; a bad repair just re-throws the same way the un-repaired parse would.
+ */
+export function repairJson(text: string): string | null {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)(?:```|$)/);
+  const raw = fenced ? fenced[1] : text;
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
+  const s = raw.slice(start);
+  // First pass: find the last '}' or ']' that closes a container outside of a string.
+  let inStr = false, esc = false, lastBoundary = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "}" || ch === "]") lastBoundary = i;
+  }
+  if (lastBoundary < 0) return null;
+  let cut = s.slice(0, lastBoundary + 1);
+  // Second pass: recompute the still-open container stack over the cut, then close it.
+  const stack: string[] = [];
+  inStr = false; esc = false;
+  for (let i = 0; i < cut.length; i++) {
+    const ch = cut[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") stack.pop();
+  }
+  cut = cut.replace(/[\s,]+$/, "");
+  while (stack.length) cut += stack.pop();
+  return cut;
+}
+
 export interface CompleteOptions<T> {
   prompt: string;
   schema: ZodType<T>;
@@ -68,13 +108,18 @@ export async function completeJSON<T>(opts: CompleteOptions<T>): Promise<T> {
     "Respond with ONLY a single valid JSON object — no prose, no markdown code fences.";
 
   let lastErr: unknown;
+  let lastText = "";
+  // Budget can grow across attempts: a response that stopped on `max_tokens` was truncated, so retrying
+  // with the SAME budget fails identically — double it (capped) before the next try. This is the root-cause
+  // fix for the retrieval-planner (and any long-output engine) failing on truncated JSON.
+  let budget = opts.maxTokens ?? 1024;
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({
         model,
-        max_tokens: opts.maxTokens ?? 1024,
+        max_tokens: budget,
         system,
         messages: [{ role: "user", content: opts.prompt }],
       }),
@@ -86,6 +131,7 @@ export async function completeJSON<T>(opts: CompleteOptions<T>): Promise<T> {
     const body = (await res.json()) as {
       content?: Array<{ text?: string }>;
       usage?: { input_tokens?: number; output_tokens?: number };
+      stop_reason?: string;
     };
     const usage = body.usage ?? {};
     const p = priceFor(model);
@@ -96,11 +142,23 @@ export async function completeJSON<T>(opts: CompleteOptions<T>): Promise<T> {
     );
 
     const text = (body.content ?? []).map((c) => c.text ?? "").join("").trim();
+    lastText = text;
     try {
       return opts.schema.parse(JSON.parse(extractJson(text)));
     } catch (err) {
       lastErr = new Error(`JSON parse/validate failed: ${(err as Error).message}; got: ${text.slice(0, 200)}`);
+      // Truncated? Give the next attempt more room instead of re-sending the same doomed request.
+      if (body.stop_reason === "max_tokens") budget = Math.min(budget * 2, 8192);
     }
+  }
+  // Last resort: salvage a truncated-but-mostly-complete object rather than fail the whole stage.
+  const repaired = repairJson(lastText);
+  if (repaired) {
+    try {
+      const value = opts.schema.parse(JSON.parse(repaired));
+      console.warn(`[llm] ${opts.purpose ?? "completion"} recovered via JSON repair (response was truncated)`);
+      return value;
+    } catch { /* fall through to throw the original error */ }
   }
   throw lastErr ?? new Error("LLM completion failed");
 }

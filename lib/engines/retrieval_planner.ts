@@ -64,7 +64,7 @@ Reported figures the desk already has:
 ${input.figures}
 
 Return JSON: {"questions": [{"topic": string, "question": string, "grounds": string}]}`;
-    const plan = await completeJSON({ prompt, schema: RetrievalPlan, model: this.model, purpose: "research.retrieval_plan", maxTokens: 1000 });
+    const plan = await completeJSON({ prompt, schema: RetrievalPlan, model: this.model, purpose: "research.retrieval_plan", maxTokens: 2400 });
     return { questions: normalizePlan(plan.questions, this.cap) };
   }
 }
