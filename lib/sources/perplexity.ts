@@ -127,6 +127,9 @@ export const AnalystViewSchema = z.object({
   price_target_usd: z.number().nullable(),
   rating: z.string().nullable(),         // e.g. buy/hold/sell or star rating
   economic_moat: z.string().nullable(),  // Morningstar-style: none/narrow/wide
+  // Best-effort recency stamp on the consensus target: when the desk knows a target is months old it
+  // can weigh a large price-to-target gap as a possible pending downgrade rather than a live dislocation.
+  target_as_of: z.string().nullable().default(null), // ISO date the target was last set/updated, if known
   summary: z.string(),
 });
 export type AnalystView = z.infer<typeof AnalystViewSchema>;
@@ -165,7 +168,7 @@ export class PerplexityFinance {
   /** Analyst / fair-value view (covers the Morningstar-style data: fair value, rating, moat). */
   async analystView(ticker: string): Promise<SourceResult<AnalystView>> {
     const r = await this.client.askJSON({
-      question: `For ${ticker}, summarize the current sell-side / Morningstar-style view: fair value estimate (USD), average price target (USD), consensus rating, and economic moat (none/narrow/wide). Return JSON {"fair_value_usd": number|null, "price_target_usd": number|null, "rating": string|null, "economic_moat": string|null, "summary": string}.`,
+      question: `For ${ticker}, summarize the current sell-side / Morningstar-style view: fair value estimate (USD), average price target (USD), the date that consensus price target was most recently set or updated (ISO YYYY-MM-DD, null if unknown), consensus rating, and economic moat (none/narrow/wide). Return JSON {"fair_value_usd": number|null, "price_target_usd": number|null, "target_as_of": string|null, "rating": string|null, "economic_moat": string|null, "summary": string}.`,
       schema: AnalystViewSchema, maxTokens: 500, purpose: "perplexity.analyst",
     });
     return { ok: r.ok, data: r.data, missing: r.missing, provenance: stamp(r.citations), error: r.error };

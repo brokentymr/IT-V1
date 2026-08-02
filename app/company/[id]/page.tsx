@@ -35,6 +35,12 @@ interface SnapContent {
   };
   scenario?: { target_period?: string | null; bands?: { revenue?: Band; net_income?: Band; eps?: Band }; beat_probability?: { revenue: number | null; eps: number | null }; sensitivity?: Array<{ driver: string; metric: string; contribution: number }>; watch_items?: string[] };
   market_context?: { consensus?: Record<string, unknown> | null; analyst_view?: Record<string, unknown> | null };
+  // Verified live-price anchor + staleness guard (desk pipeline).
+  price_context?: {
+    current_price?: number | null; as_of?: string | null; low_2m?: number | null; high_2m?: number | null;
+    ret_30d?: number | null; off_low_pct?: number | null; analyst_target?: number | null;
+    target_gap_pct?: number | null; market_repriced?: boolean; stale_frame?: boolean; note?: string;
+  };
   thesis?: {
     one_liner?: string; long_form?: string; tensions?: string[]; invalidation_triggers?: string[]; conviction?: number;
     // Control P10: typed risks & triggers as one joined system.
@@ -676,6 +682,27 @@ export default async function CompanyPage({ params, searchParams }: { params: Pr
               {sentiment.degraded?.length ? <p className="faint" style={{ fontSize: ".72rem" }}>Degraded: {sentiment.degraded.length} source(s) — confidence lowered.</p> : null}
             </div>
           ) : null}
+
+          {content.price_context?.current_price != null ? (() => {
+            const pc = content.price_context!;
+            const fmtPct = (n?: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${(n * 100).toFixed(0)}%`);
+            const fmt$ = (n?: number | null) => (n == null ? "—" : `$${n.toFixed(2)}`);
+            return (
+              <div className="panel">
+                <div className="spread"><h2>Price anchor</h2><span className="faint">as of {pc.as_of ?? "—"}</span></div>
+                <div className="row" style={{ gap: ".4rem", flexWrap: "wrap", marginBottom: ".5rem" }}>
+                  <span className="tag" style={{ fontSize: ".95rem" }}>Spot {fmt$(pc.current_price)}</span>
+                  {pc.analyst_target != null ? <span className="tag">Target {fmt$(pc.analyst_target)} ({fmtPct(pc.target_gap_pct)} vs spot)</span> : null}
+                  <span className="tag">30d {fmtPct(pc.ret_30d)}</span>
+                  <span className="tag">{fmtPct(pc.off_low_pct)} off 2m low</span>
+                  {pc.market_repriced ? <span className="tag bad">Market repriced</span> : <span className="tag good">Frame aligned</span>}
+                  {pc.stale_frame ? <span className="tag warn">Stale-frame hold</span> : null}
+                </div>
+                <p className="muted" style={{ marginTop: 0, fontSize: ".85rem" }}>{pc.note}</p>
+                <p className="faint" style={{ fontSize: ".75rem" }}>Verified quote (Yahoo Finance) — the current-price the desk anchored on. 2m range {fmt$(pc.low_2m)}–{fmt$(pc.high_2m)}.</p>
+              </div>
+            );
+          })() : null}
 
           {content.market_context ? (
             <div className="panel">

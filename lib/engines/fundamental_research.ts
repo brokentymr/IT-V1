@@ -54,6 +54,8 @@ import { buildClaimDag, propagateRestatement, retractFact } from "./claim_dag";
 import { CLAIM_DAG_CONFIG } from "../config/claim_dag";
 import { positioningReadout } from "./positioning_readout";
 import { POSITIONING_CONFIG } from "../config/positioning";
+import { PriceAdapter } from "../sources/prices";
+import { buildPriceContext, type PriceContext } from "./price_context";
 import { upsertReadThrough, linkReadThroughMatch } from "./read_through_relationships";
 
 interface CompanyRow {
@@ -103,6 +105,26 @@ async function fetchMarketContext(finance: PerplexityFinance, ticker: string): P
   if (!consensus && !analyst_view) return null;
   const citations = [c?.provenance?.url, a?.provenance?.url].filter((u): u is string => !!u);
   return { consensus, analyst_view, citations };
+}
+
+interface PriceContextResult { ctx: PriceContext; url: string; retrieved_at: string }
+
+/**
+ * Verified live-price anchor for the desk pass (best-effort). Pulls the recent daily-bar window via the
+ * keyless PriceAdapter and derives the staleness signal against the (advisory) sell-side target, so the
+ * report anchors on a fetched, timestamped quote instead of a hand-typed price. Returns null only when
+ * there is no ticker; a dead price source still returns a context (ok:false) so the caller can degrade.
+ */
+async function fetchPriceContext(
+  ticker: string | null,
+  analystTarget: number | null,
+  targetAsOf: string | null,
+  adapter: PriceAdapter,
+): Promise<PriceContextResult | null> {
+  if (!ticker) return null;
+  const bars = await adapter.dailyBars(ticker).catch(() => null);
+  const ctx = buildPriceContext({ bars: bars?.ok ? bars.data : null, analystTarget, targetAsOf });
+  return { ctx, url: bars?.provenance?.url ?? "https://finance.yahoo.com", retrieved_at: bars?.provenance?.retrieved_at ?? new Date().toISOString() };
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +286,7 @@ export async function runCoveragePass(opts: {
   autoCommit?: (input: AutoCommitInput) => Promise<AutoCommitResult>; // Workstream C; omit to skip publish
   positioningDesk?: PositioningDesk; // pipeline upgrade: the decision engine; omit to skip (tests/eval)
   transcriptSource?: TranscriptSource; // real verbatim transcript provider; omit → resolve from config/env (degrades)
+  priceAdapter?: PriceAdapter; // verified live-price anchor; defaults to the keyless Yahoo adapter, injectable for tests
 }): Promise<CoverageResult> {
   const config = opts.config ?? FUNDAMENTALS_CONFIG;
   const sec = opts.sec ?? new SecAdapter();
@@ -298,6 +321,20 @@ export async function runCoveragePass(opts: {
 
   // 3. Advisory market context (Perplexity/Fiscal.ai) + thesis narration over the figures.
   const mc = opts.finance ? await fetchMarketContext(opts.finance, company.primary_ticker) : null;
+  // 3a. Verified live-price anchor + staleness guard. Fetched EARLY so every downstream reader (the
+  // positioning decision, the P12 fair-value readout, the auto-commit gate) reasons off a fetched,
+  // timestamped quote — not a hand-typed price — and knows when the market has repriced ahead of a
+  // possibly-stale sell-side target. Best-effort: a dead price source degrades to an unusable context.
+  const av = (mc?.analyst_view ?? null) as { price_target_usd?: number | null; target_as_of?: string | null } | null;
+  const priceCtx = await fetchPriceContext(
+    company.primary_ticker,
+    av?.price_target_usd ?? null,
+    av?.target_as_of ?? null,
+    opts.priceAdapter ?? new PriceAdapter(),
+  );
+  if (priceCtx?.ctx.ok) {
+    console.log(`[coverage] ${company.primary_ticker} price ${priceCtx.ctx.note}`);
+  }
   // 3b. Filing document (fetched once, reused for MD&A drivers + link enrichment). Resilient to a
   // missing filingUrl: the feeders (filing webhook / EDGAR poll) sometimes drop the primary-document
   // URL, and without it the entire qualitative half — MD&A drivers (#3c), the forward scenario (#4),
@@ -624,6 +661,14 @@ export async function runCoveragePass(opts: {
       scenario_summary: scenarioSummary,
       market_context: mc ? JSON.stringify({ consensus: mc.consensus, analyst_view: mc.analyst_view }) : undefined,
       next_earnings_date: company.next_earnings_date,
+      price_context: priceCtx?.ctx.ok ? {
+        current_price: priceCtx.ctx.current_price,
+        as_of: priceCtx.ctx.as_of,
+        analyst_target: priceCtx.ctx.analyst_target,
+        target_gap_pct: priceCtx.ctx.target_gap_pct,
+        market_repriced: priceCtx.ctx.market_repriced,
+        note: priceCtx.ctx.note,
+      } : undefined,
     }).catch((e) => { console.warn(`[coverage] positioning failed: ${(e as Error).message}`); return null; });
 
     // Control P12: deterministic positioning readout — implied assumptions, an illustrative fair value
@@ -631,16 +676,23 @@ export async function runCoveragePass(opts: {
     // best-effort from the latest price signal; degrades to null (no readout) when spot/scenario/target
     // are missing. Merged onto the decision before it is written to the snapshot content.
     if (positioning) {
-      const spotRow = await query<{ price: number | null }>(
-        `SELECT (payload->>'price')::float8 AS price FROM signal_events
-          WHERE company_id = $1 AND payload ? 'price' ORDER BY ts DESC LIMIT 1`,
-        [company.id],
-      ).catch(() => ({ rows: [] as { price: number | null }[] }));
+      // Spot: prefer the verified live-price anchor fetched this pass; fall back to the latest
+      // TradingView-fed signal_events price only when the price fetch degraded. Previously this read
+      // signal_events alone, which is empty for research-only names → the readout silently degraded.
+      let spot = priceCtx?.ctx.ok ? priceCtx.ctx.current_price : null;
+      if (spot == null) {
+        const spotRow = await query<{ price: number | null }>(
+          `SELECT (payload->>'price')::float8 AS price FROM signal_events
+            WHERE company_id = $1 AND payload ? 'price' ORDER BY ts DESC LIMIT 1`,
+          [company.id],
+        ).catch(() => ({ rows: [] as { price: number | null }[] }));
+        spot = spotRow.rows[0]?.price ?? null;
+      }
       const readout = positioningReadout({
         modelRatios: { gross_margin: model.ratios.gross_margin ?? null, net_margin: model.ratios.net_margin ?? null },
         scenarioBands: scenario ? { eps: scenario.bands.eps ?? null, revenue_growth: scenario.bands.revenue_growth ?? null } : null,
         priceTarget: positioning.price_target,
-        spot: spotRow.rows[0]?.price ?? null,
+        spot,
         consensusMultiple: null,
         lean: positioning.strategic_stance,
         invalidationTriggers: positioning.invalidation_triggers,
@@ -686,6 +738,19 @@ export async function runCoveragePass(opts: {
       };
     }
 
+    // Verified live-price anchor gets its OWN Tier-2 source row (Yahoo), kept distinct from the filing
+    // and the Perplexity market context. This is the timestamped quote the report anchors on + the
+    // staleness signal — persisted so the diff, the UI, and any re-run can see what price it reasoned off.
+    let priceContext: Record<string, unknown> | undefined;
+    if (priceCtx?.ctx.ok) {
+      const pcSrc = await client.query<{ id: string }>(
+        `INSERT INTO sources (company_id, tier, kind, origin, url, title, retrieved_at, metadata)
+         VALUES ($1, 2, 'api', 'Yahoo Finance', $2, $3, now(), $4) RETURNING id`,
+        [company.id, priceCtx.url, `Price anchor ${company.primary_ticker}`, { as_of: priceCtx.ctx.as_of, retrieved_at: priceCtx.retrieved_at }],
+      );
+      priceContext = { ...priceCtx.ctx, provenance: [{ claim_id: "price_context", source_ref: pcSrc.rows[0].id }] };
+    }
+
     const thesis = Thesis.parse({
       one_liner: synth.one_liner,
       long_form: `${synth.long_form}${synth.actual_vs_expected ? `\n\nActual vs expected: ${synth.actual_vs_expected}` : ""}`,
@@ -727,6 +792,7 @@ export async function runCoveragePass(opts: {
         provenance: Object.keys(line_items).map((k) => ({ claim_id: `fundamentals.${k}`, source_ref: sourceId })),
       },
       ...(marketContext ? { market_context: marketContext } : {}),
+      ...(priceContext ? { price_context: priceContext } : {}),
       ...(hypothesesBlock ? { hypotheses: hypothesesBlock } : {}),
       ...(scenarioBlock ? { scenario: scenarioBlock } : {}),
       ...(surprises.length ? { surprises } : {}),
@@ -839,7 +905,13 @@ export async function runCoveragePass(opts: {
   const positioningOk = positioning ? positioningComplete(positioning).complete : true;
   // A claim that contradicts the computed figures (W6) is a hard hold, like a standing contradiction.
   // A hard accounting-identity failure (MU-audit P1) is likewise never auto-published — held for review.
-  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0 && integrity.ok && q.quarantined.length === 0 && (p10Triggers.length === 0 || blocks(riskJoin).length === 0) && scorecard.ok;
+  // Staleness guard: when the market has repriced ahead of the frame's sell-side target, hold a
+  // constructive/bullish call for the human checkpoint — the thesis may be anchored to a stale target.
+  // An already-cautious/neutral/avoid stance is not inflated by a stale target, so it still auto-commits.
+  const bullishStance = positioning ? ["strong_long", "constructive"].includes(positioning.strategic_stance) : false;
+  const staleFrameHold = !!priceCtx?.ctx.stale_frame && bullishStance;
+  if (staleFrameHold) console.warn(`[coverage] ${company.primary_ticker} held: market repriced ahead of frame (${positioning?.strategic_stance}) — routing to review`);
+  const cleared = (dp ? dp.cleared : research.verification.recommendation !== "review") && !grounding.gated && positioningOk && consistency.length === 0 && integrity.ok && q.quarantined.length === 0 && (p10Triggers.length === 0 || blocks(riskJoin).length === 0) && scorecard.ok && !staleFrameHold;
   let committed = false;
   let publishedStatus = "in_research";
   let contentJobId: string | null = null;

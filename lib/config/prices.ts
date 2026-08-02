@@ -20,3 +20,27 @@ export const PRICES_CONFIG: PricesConfig = {
   benchmark: "SPY",
   majorMovePct: 0.07, // ≥7% → "major"
 };
+
+/**
+ * Price-context / staleness-guard configuration (desk pipeline). Config-not-code: the thresholds that
+ * decide when the market has "already repriced" ahead of an unrevised sell-side target — the signal
+ * that flips a report from "buy the dislocation" to "the frame is stale, re-underwrite."
+ *
+ * - repricedGapPct: analyst target must sit at least this fraction ABOVE the verified spot for the gap
+ *   to count as a possible stale-target signal (e.g. 0.15 → target ≥15% above price).
+ * - nearLowPct: spot must be within this fraction of its own 2-month low for the large target gap to
+ *   read as "market has repriced" rather than "ordinary discount to target" (e.g. 0.08 → within 8%).
+ * - ret30dRepricePct: a 30-day drawdown at/beyond this magnitude independently marks a repriced frame
+ *   (e.g. -0.15 → down ≥15% in a month), even if the target gap is unavailable.
+ */
+export interface PriceContextConfig {
+  repricedGapPct: number;
+  nearLowPct: number;
+  ret30dRepricePct: number;
+}
+
+export const PRICE_CONTEXT_CONFIG: PriceContextConfig = {
+  repricedGapPct: 0.15,
+  nearLowPct: 0.08,
+  ret30dRepricePct: -0.15,
+};

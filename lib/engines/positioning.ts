@@ -76,6 +76,17 @@ export interface PositioningInput {
   scenario_summary: string;
   market_context?: string;
   next_earnings_date?: string | null;
+  // Verified live-price anchor + staleness signal (desk pipeline). When present, the PM must reason
+  // about whether the market has ALREADY repriced ahead of a (possibly stale) sell-side target before
+  // reading a price-to-target gap as a dislocation to buy.
+  price_context?: {
+    current_price: number | null;
+    as_of: string | null;
+    analyst_target: number | null;
+    target_gap_pct: number | null;
+    market_repriced: boolean;
+    note: string;
+  };
 }
 
 export interface PositioningDesk {
@@ -87,6 +98,10 @@ export class ClaudePositioningDesk implements PositioningDesk {
 
   async decide(input: PositioningInput): Promise<PositioningDecision> {
     const debates = (input.thesis.key_debates ?? []).map((d) => `- ${d.question} | bull: ${d.bull} | bear: ${d.bear} | desk lean: ${d.lean}`).join("\n") || "(none stated)";
+    const pc = input.price_context;
+    const priceBlock = pc && pc.current_price != null
+      ? `Verified price anchor (use THIS as the current price, not any figure in the prose): $${pc.current_price}${pc.as_of ? ` as of ${pc.as_of}` : ""}.${pc.analyst_target != null ? ` Sell-side target $${pc.analyst_target}${pc.target_gap_pct != null ? ` (${(pc.target_gap_pct * 100).toFixed(0)}% above spot)` : ""}.` : ""}${pc.market_repriced ? ` STALE-FRAME WARNING: ${pc.note} Do NOT read the gap-to-target as a proven dislocation to buy; weigh it as a possible pending downgrade and let it lower conviction / stance unless the fundamentals independently justify the call.` : ` ${pc.note}`}`
+      : "";
     const prompt = `You are a portfolio manager. Convert the desk's research into a POSITIONING DECISION a PM can act on.
 Do NOT hedge into mush ("high-reward, high-variance") — COMMIT to a call and justify it.
 
@@ -97,6 +112,10 @@ Rules:
   (e.g. "no edge — pass; priced for the base case"). A clear pass is a valid, valuable answer; a
   decision-free hedge is not.
 - Price target {bear, base, bull} tied to the scenario bands and consensus multiples; null if not derivable.
+- Anchor expected_return and the target range to the VERIFIED price below, not any price stated in the
+  prose. If a stale-frame warning is present, the market has already repriced ahead of the sell-side
+  target: treat a large price-to-target gap as a pending-downgrade risk, not a proven dislocation — say
+  so in the variant view and do not let a stale target inflate stance, conviction, or expected return.
 - Extract DATED catalysts — events that move the thesis (next earnings, product/qual milestones,
   policy decisions). Use the next earnings date. Never leave catalysts empty for a covered name.
 - Give conviction (1-5) with a one-line basis, a risk/reward (e.g. "1 : 1.8"), a horizon, and sizing
@@ -111,6 +130,7 @@ Desk conviction: ${input.thesis.conviction}/5 · verification confidence ${(inpu
 Key debates (already adjudicated by the desk):
 ${debates}
 Scenario: ${input.scenario_summary}
+${priceBlock}
 ${input.market_context ? `Market context: ${input.market_context}` : ""}
 
 Return JSON:
