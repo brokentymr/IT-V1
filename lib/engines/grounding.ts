@@ -68,13 +68,23 @@ export interface GroundingGate {
  * is downgraded to "review" — a confident-but-ungrounded thesis rests at the human checkpoint, never
  * auto-published. Never upgrades review → auto.
  */
-export function applyGroundingGate(v: VerdictLike, minCoverage: number, opts: CoverageOpts = {}): GroundingGate {
+export function applyGroundingGate(v: VerdictLike, minCoverage: number, opts: CoverageOpts = {}, maxUnverifiableFraction?: number): GroundingGate {
   const report = groundedCoverage(v, opts);
   if (v.recommendation !== "auto") {
     return { recommendation: "review", gated: false, reason: null, report };
   }
   if (report.contradicted > 0) {
     return { recommendation: "review", gated: true, reason: `${report.contradicted} contradicted claim(s)`, report };
+  }
+  // Integrity cap: a thesis resting on too many unsourceable claims must not auto-publish, however high the
+  // computed coverage — dropping unverifiable claims from the denominator can otherwise manufacture a false 100%.
+  const allClaims = report.total + report.unverifiable;
+  if (maxUnverifiableFraction != null && allClaims > 0 && report.unverifiable / allClaims > maxUnverifiableFraction) {
+    return {
+      recommendation: "review", gated: true,
+      reason: `${report.unverifiable}/${allClaims} load-bearing claims unverifiable (> ${(maxUnverifiableFraction * 100).toFixed(0)}% cap) — too many gaps to auto-publish`,
+      report,
+    };
   }
   if (report.total > 0 && report.coverage < minCoverage) {
     return {

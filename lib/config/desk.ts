@@ -53,6 +53,14 @@ export interface DeskConfig {
    *  `unverifiable` (dropped from the coverage denominator, surfaced as an explicit gap), so a name that
    *  is well-grounded on real filings isn't sunk by one genuinely-private fact. */
   coverageBindingEnabled: boolean;
+  /** How hard the binder tries, INDEPENDENT of the publish gate: it binds every unverified claim toward
+   *  this coverage target on every run (not just below the gate). Keeping this well above
+   *  `minGroundedCoverage` means cleared reports still get every citable claim actually cited. */
+  coverageBindTarget: number;
+  /** Integrity cap: if more than this fraction of load-bearing claims end up `unverifiable` (dropped from
+   *  the denominator), the thesis rests too heavily on unsourceable claims → hold for review regardless of
+   *  the computed coverage %, so aggressive dropping can't collapse the denominator into a false 100%. */
+  maxUnverifiableFraction: number;
   /** Targeted external (Perplexity) queries allowed PER still-unbound claim after the filing pass. */
   perClaimExternalQueries: number;
   /** Max bind→re-verify rounds in the coverage-closer. */
@@ -82,6 +90,8 @@ export const DESK_CONFIG: DeskConfig = {
   minGroundedCoverage: 0.5,
   retrievalPlannerEnabled: true,
   coverageBindingEnabled: true,
+  coverageBindTarget: 0.85,
+  maxUnverifiableFraction: 0.34,
   perClaimExternalQueries: 1,
   coverageMaxBindRounds: 2,
   bindMinKeywordOverlap: 0.5,

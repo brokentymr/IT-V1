@@ -59,6 +59,41 @@ describe("applyGroundingGate", () => {
     expect(g.recommendation).toBe("review");
     expect(g.gated).toBe(false);
   });
+
+  // Integrity cap: too many claims dropped as `unverifiable` must not manufacture a false 100%.
+  it("holds when more than the cap of load-bearing claims are unverifiable, despite 100% computed coverage", () => {
+    const verification = {
+      recommendation: "auto" as const,
+      confidence: 0.8,
+      verdicts: [
+        { status: "supported" as const, citation: "10-Q: x" },
+        { status: "supported" as const, citation: "10-Q: y" },
+        { status: "unverified" as const, citation: "", unverifiable: true },
+        { status: "unverified" as const, citation: "", unverifiable: true },
+        { status: "unverified" as const, citation: "", unverifiable: true },
+      ],
+    };
+    const g = applyGroundingGate(verification, 0.5, { requireCitation: true }, 0.34);
+    expect(g.report.coverage).toBe(1);      // 2/2 on the counted claims
+    expect(g.recommendation).toBe("review"); // but 3/5 unverifiable > 34% cap → held
+    expect(g.reason).toMatch(/unverifiable/);
+  });
+
+  it("auto-publishes when unverifiable stays within the cap", () => {
+    const verification = {
+      recommendation: "auto" as const,
+      confidence: 0.8,
+      verdicts: [
+        { status: "supported" as const, citation: "10-Q: a" },
+        { status: "supported" as const, citation: "10-Q: b" },
+        { status: "supported" as const, citation: "10-Q: c" },
+        { status: "unverified" as const, citation: "", unverifiable: true }, // 1/4 = 25% ≤ cap
+      ],
+    };
+    const g = applyGroundingGate(verification, 0.5, { requireCitation: true }, 0.34);
+    expect(g.recommendation).toBe("auto");
+    expect(g.gated).toBe(false);
+  });
 });
 
 describe("partitionClaims", () => {

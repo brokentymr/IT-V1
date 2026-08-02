@@ -204,7 +204,9 @@ export class ClaudeResearchPanel implements ResearchPanel {
       return c.length ? supported / c.length : 1;
     };
     for (let round = 0; round < this.cfg.coverageMaxBindRounds; round++) {
-      if (coverage() >= this.cfg.minGroundedCoverage) break;
+      // Bind toward the TARGET (not the publish gate): cite every claim we can, even on a run that already
+      // clears the gate, so published claims carry real citations. The gate stays separate, below.
+      if (coverage() >= this.cfg.coverageBindTarget) break;
       const open = verification.verdicts.filter((v) => v.status === "unverified" && !v.unverifiable);
       if (!open.length) break;
       let results: Awaited<ReturnType<ResearchBind>>;
@@ -232,14 +234,21 @@ export class ClaudeResearchPanel implements ResearchPanel {
     }
 
     // Re-decide on the grounded artifact. Only ever UPGRADE review → auto (binding can't make things worse),
-    // and only when the artifact is genuinely publishable by substance AND clears the coverage bar.
+    // and only when the artifact is genuinely publishable by substance AND clears the coverage GATE (not the
+    // higher bind target) AND isn't resting on too many unsourceable claims (the integrity cap — see below).
+    const all = verification.verdicts.length;
+    const unver = verification.verdicts.filter((v) => v.unverifiable).length;
+    const tooManyGaps = all > 0 && unver / all > this.cfg.maxUnverifiableFraction;
     if (!trace.cleared
+        && !tooManyGaps
         && coverage() >= this.cfg.minGroundedCoverage
         && publishableBySubstance(verification, this.cfg)) {
       trace.cleared = true;
       trace.stopped_reason = "cleared";
       verification.recommendation = "auto";
       console.log(`[research] coverage-closer: grounded artifact now clears (coverage ${(coverage() * 100).toFixed(0)}%, no contradictions) — recommend auto`);
+    } else if (tooManyGaps) {
+      console.log(`[research] coverage-closer: ${unver}/${all} claims unverifiable (> ${(this.cfg.maxUnverifiableFraction * 100).toFixed(0)}% cap) — holding for review`);
     }
   }
 
